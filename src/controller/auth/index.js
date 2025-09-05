@@ -1,12 +1,25 @@
-const { registerUser } = require("../../services/auth");
+const { registerUser, loginUser } = require("../../services/auth");
 
-const {asyncHandler} = reqiure("../../utils/asyncHandler/index.js");
+const { asyncHandler } = require("../../utils/asyncHandler/index");
 const ApiResponse = require("../../utils/apiResponse/index");
-exports.handleRegistration = asyncHandler(async(req,res)=>{
-    const {username,password,email,profilePicture} = req.body;
 
-    const result = await registerUser(username,password,email,profilePicture);
+exports.handleRegistration = asyncHandler(async (req, res) => {
+  const { username, password, email, profilePicture } = req.body;
 
-    const {message,statusCode,data} = result;
-    return res.status(statusCode).json(new ApiResponse(statusCode,data,message));
-})
+  const result = await registerUser(username, password, email, profilePicture);
+
+  const { message, statusCode, data } = result;
+  return res
+    .status(statusCode)
+    .json(new ApiResponse(statusCode, data, message));
+});
+
+exports.handleLogin = asyncHandler(async (req, res) => {
+  const { email, password } = req.body;
+
+  const result = await loginUser(email, password);
+  const { message, statusCode, data } = result;
+  return res
+    .status(statusCode)
+    .json(new ApiResponse(statusCode, data, message));
+});

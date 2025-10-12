@@ -4,9 +4,9 @@ const { asyncHandler } = require("../../utils/asyncHandler/index");
 const ApiResponse = require("../../utils/apiResponse/index");
 
 exports.handleRegistration = asyncHandler(async (req, res) => {
-  const { username, password, email, profilePicture } = req.body;
+  const { username, password, email } = req.body;
 
-  const result = await registerUser(username, password, email, profilePicture);
+  const result = await registerUser(username, password, email);
 
   const { message, statusCode, data } = result;
   return res

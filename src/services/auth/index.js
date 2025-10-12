@@ -1,7 +1,7 @@
-const { checkUserExists, createUser, createJwt, checkPassword } = require("../../repositories/auth");
+const { checkUserExists, createUser,  checkPassword, signAccessToken, createToken } = require("../../repositories/auth");
 const bcrypt = require("bcrypt");
 
-exports.registerUser = async (username,password,email,profilePicture) =>{
+exports.registerUser = async (username,password,email) =>{
     if(!username||!password||!email){
         return {
             data:null,
@@ -22,7 +22,7 @@ exports.registerUser = async (username,password,email,profilePicture) =>{
 
     let hashedPassword = await bcrypt.hash(password,10);
 
-    user = await createUser(username,hashedPassword,email,profilePicture);
+    user = await createUser(username,hashedPassword,email);
 
     if(!user){
         return {
@@ -68,7 +68,7 @@ exports.loginUser = async(email,password) =>{
         }
     }
 
-    let token = await createJwt(user._id,user.role);
+    let token = createToken(user._id,user.username,user.email);
 
     return {
         data:token,

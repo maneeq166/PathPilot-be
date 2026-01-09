@@ -1,4 +1,11 @@
-const { registerUser, loginUser } = require("../../services/auth");
+const {
+  registerUser,
+  loginUser,
+  readUser,
+  readSingleUser,
+  updatedUser,
+  deletedUser,
+} = require("../../services/auth");
 
 const { asyncHandler } = require("../../utils/asyncHandler/index");
 const ApiResponse = require("../../utils/apiResponse/index");
@@ -23,3 +30,40 @@ exports.handleLogin = asyncHandler(async (req, res) => {
     .status(statusCode)
     .json(new ApiResponse(statusCode, data, message));
 });
+
+exports.handleQuery = asyncHandler(async (req, res) => {
+  const { email, username } = req.query;
+  const result = await readUser(email, username);
+  const { message, statusCode, data } = result;
+  return res
+    .status(statusCode)
+    .json(new ApiResponse(statusCode, data, message));
+});
+
+exports.handleId = asyncHandler(async (req, res) => {
+  const id = req.id;
+  const result = await readSingleUser(id);
+  const { message, statusCode, data } = result;
+  return res
+    .status(statusCode)
+    .json(new ApiResponse(statusCode, data, message));
+});
+
+exports.handleUpdation = asyncHandler(async (req, res) => {
+  const id = req.id;
+  const { updatedData } = req.body;
+
+  const { message, statusCode, data } = await updatedUser(id, updatedData);
+  return res
+    .status(statusCode)
+    .json(new ApiResponse(statusCode, data, message));
+});
+
+exports.handleDeletion = asyncHandler(async(req,res)=>{
+  const id = req.id;
+  const result = await deletedUser(id);
+  const { message, statusCode, data } = result;
+  return res
+    .status(statusCode)
+    .json(new ApiResponse(statusCode, data, message));
+})

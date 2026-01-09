@@ -14,12 +14,22 @@ exports.verifyToken = (token) => {
 exports.createToken = (id,username,email) =>{
     return jwt.sign({id,username,email},env.JWT_SECRET);
 }
-/**
- * Check if a user exists by email or phoneNumber
- */
+
 exports.checkUser = async (email) => {
   return await User.find({ email });
 };
+
+exports.checkById = async (id)=>{
+  return await User.findById(id);
+}
+
+exports.checkByUsername = async (username)=>{
+  return await User.find({username});
+}
+
+exports.checkAllUser = async () =>{
+  return await User.find();
+}
 
 /**
  * Update user by ID

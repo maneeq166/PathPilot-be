@@ -19,9 +19,12 @@ exports.isUserOrAdmin = async (req, res, next) => {
       return res.status(400).json(new ApiResponse(400, null, "Access Denied"));
     }
 
+    console.log(decodedToken);
+    
+
     req.role = decodedToken.role;
     req.username = decodedToken.username;
-    req.id = decodedToken._id;
+    req.id = decodedToken.id;   
     req.email = decodedToken.email;
 
     next();

@@ -105,36 +105,31 @@ exports.readUser = async ({ email, username }) => {
   };
 };
 
-exports.readSingleUser = async (id)=>{
-    console.log(id);
-    
-    if(!id){
+exports.readSingleUser = async (id) => {
+    if (!id) {
         return {
-            data:null,
-            message:"Required fields are missing",
-            statusCode:400
-        }
+            data: null,
+            message: "Required fields are missing",
+            statusCode: 400,
+        };
     }
-
-    console.log(id);
-    
 
     let user = await checkById(id);
 
-    if(!user){
+    if (!user) {
         return {
-            data:null,
-            message:"User does not exist",
-            statusCode:400
-        }
+            data: null,
+            message: "User does not exist",
+            statusCode: 400,
+        };
     }
 
     return {
-        data:user,
-        message:"User exists",
-        statusCode:200
-    }
-}
+        data: user,
+        message: "User exists",
+        statusCode: 200,
+    };
+};
 
 
 exports.updatedUser = async (id,data)=>{

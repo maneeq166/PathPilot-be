@@ -20,7 +20,7 @@ exports.checkUserExists = async (email) => {
 };
 
 exports.checkById = async (id)=>{
-  return await User.findById(id);
+  return await User.findById(id).select("-password");
 }
 
 exports.checkByUsername = async (username)=>{

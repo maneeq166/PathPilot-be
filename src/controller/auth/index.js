@@ -41,7 +41,7 @@ exports.handleQuery = asyncHandler(async (req, res) => {
 });
 
 exports.handleId = asyncHandler(async (req, res) => {
-  const id = req.id;
+  const id = req.id;  
   const result = await readSingleUser(id);
   const { message, statusCode, data } = result;
   return res

@@ -11,12 +11,12 @@ exports.verifyToken = (token) => {
   return jwt.verify(token, env.JWT_SECRET);
 };
 
-exports.createToken = (id,username,email) =>{
-    return jwt.sign({id,username,email},env.JWT_SECRET);
+exports.createToken = (id,username,email,role) =>{
+    return jwt.sign({id,username,email,role},env.JWT_SECRET);
 }
 
-exports.checkUser = async (email) => {
-  return await User.find({ email });
+exports.checkUserExists = async (email) => {
+  return await User.findOne({ email });
 };
 
 exports.checkById = async (id)=>{

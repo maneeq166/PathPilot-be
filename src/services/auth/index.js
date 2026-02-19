@@ -1,4 +1,4 @@
-const { checkUserExists, createUser,  checkPassword, signAccessToken, createToken, updateUser, deleteUser, checkUser, checkByUsername, checkById, checkAllUser } = require("../../repositories/auth");
+const {  checkUserExists, createUser,  checkPassword, signAccessToken, createToken, updateUser, deleteUser, checkUser, checkByUsername, checkById, checkAllUser } = require("../../repositories/auth");
 const bcrypt = require("bcrypt");
 
 exports.registerUser = async (username,password,email) =>{
@@ -11,7 +11,7 @@ exports.registerUser = async (username,password,email) =>{
     }
 
     let user = await checkUserExists(email);
-
+    
     if(user){
         return {
             data:null,
@@ -24,7 +24,7 @@ exports.registerUser = async (username,password,email) =>{
     
 
     user = await createUser(username,hashedPassword,email);
-
+    
     if(!user){
         return {
             data:null,
@@ -34,7 +34,7 @@ exports.registerUser = async (username,password,email) =>{
     }
 
     return {
-        data:null,
+        data:username,
         message:"User registered!",
         statusCode:201
     }
@@ -69,7 +69,7 @@ exports.loginUser = async(email,password) =>{
         }
     }
 
-    let token = createToken(user._id,user.username,user.email);
+    let token = createToken(user._id,user.username,user.email,user.role);
 
     return {
         data:token,
@@ -79,33 +79,35 @@ exports.loginUser = async(email,password) =>{
 }
 
 
-exports.readUser = async (email,username)=>{
-    if(!data){
-        return {
-            data:null,
-            message:"Required fields are missing",
-            statusCode:400
-        }
-    }
-
-    let user;
-
-    if(email){
-        user = await checkUser(email);
-    }else if(username){
-        user = await checkByUsername(username);
-    }else {
-        user = await checkAllUser();
-    }
-
+exports.readUser = async ({ email, username }) => {
+  if (!email && !username) {
     return {
-        data:user,
-        message:"Fetched Information",
-        statusCode:200
-    }
-}
+      data: null,
+      message: "Required fields are missing",
+      statusCode: 400,
+    };
+  }
+
+  let user;
+
+  if (email) {
+    user = await checkUserExists(email);
+  } else if (username) {
+    user = await checkByUsername(username);
+  } else {
+    user = await checkAllUser();
+  }
+
+  return {
+    data: user,
+    message: "Fetched Information",
+    statusCode: 200,
+  };
+};
 
 exports.readSingleUser = async (id)=>{
+    console.log(id);
+    
     if(!id){
         return {
             data:null,
@@ -113,6 +115,9 @@ exports.readSingleUser = async (id)=>{
             statusCode:400
         }
     }
+
+    console.log(id);
+    
 
     let user = await checkById(id);
 

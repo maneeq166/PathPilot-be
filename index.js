@@ -87,6 +87,7 @@ app.use((req, res, next) => {
 //  Connect to MongoDB
 connectToDatabase(MONGODB_URI);
 
+
 //  Start listening
 app.listen(PORT, () => {
   console.log(`Server is running on port ${PORT} in ${NODE_ENV} mode`);

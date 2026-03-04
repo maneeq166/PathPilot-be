@@ -73,6 +73,7 @@ if (NODE_ENV === "development") {
 // Routes
 app.get("/", (req, res) => res.send("Welcome to the  API"));
 app.use("/api/auth",require("./src/routes/auth/index.js"));
+app.use("/api/resume",require("./src/routes/resume/index.js"));
 
 
 //  404 Fallback

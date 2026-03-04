@@ -1,3 +1,56 @@
+# PathPilot TODO & Implementation Guide
+
+## ✅ Implementation Checklist
+
+### Phase 1: Authentication System
+- [ ] Set up Express.js server with MongoDB connection
+- [ ] Create User model with name, email, password, skills, experience fields
+- [ ] Implement JWT authentication (register, login endpoints)
+- [ ] Add password hashing with bcrypt
+- [ ] Create auth middleware for protected routes
+- [ ] Test auth endpoints with Postman/cURL
+
+### Phase 2: Resume Upload & Processing
+- [ ] Create Multer configuration for file uploads (PDF, DOCX)
+- [ ] Set up storage for uploaded resumes
+- [ ] Implement PDF text extraction using pdf-parse
+- [ ] Implement DOCX text extraction using mammoth
+- [ ] Build NLP pipeline to extract:
+  - Skills (technical skills, soft skills)
+  - Role/Job Title
+  - Work experience
+  - Education
+- [ ] Create Resume model with extracted data fields
+- [ ] Link resume to user in database
+- [ ] Create resume upload endpoint POST /api/resume/upload
+- [ ] Create get resume endpoint GET /api/resume
+
+### Phase 3: Website Scraping for Jobs
+- [ ] Set up Puppeteer or Cheerio for web scraping
+- [ ] Create scraper for job sites (LinkedIn, Indeed, Glassdoor)
+- [ ] Implement job data parsing (title, company, location, description, salary)
+- [ ] Store scraped jobs in database
+- [ ] Implement job matching algorithm based on user skills
+- [ ] Create job recommendations endpoint GET /api/jobs/match
+- [ ] Create save job endpoint POST /api/jobs/save/:jobId
+- [ ] Create get saved jobs endpoint GET /api/jobs/saved
+
+### Phase 4: User Profile & Data Storage
+- [ ] Update User model to store extracted resume data
+- [ ] Create user profile endpoint GET /api/user/profile
+- [ ] Create update profile endpoint PUT /api/user/profile
+- [ ] Implement skill matching with job requirements
+
+### Phase 5: Frontend Integration
+- [ ] Set up React frontend with Vite
+- [ ] Implement auth pages (login, register)
+- [ ] Create resume upload page with drag-and-drop
+- [ ] Build job search/browse page
+- [ ] Add job saving functionality
+- [ ] Connect all endpoints with proper error handling
+
+---
+
 Below is the **PathPilot MVP API List**.
 This is **clean, minimal, and academically correct** for your project.
 
@@ -133,7 +186,7 @@ Fetch parsed resume
 
 ---
 
-# 3. Job APIs
+# 3. Job APIs (Scraped & Matched)
 
 ---
 
@@ -146,7 +199,7 @@ GET /api/jobs/match
 ```
 
 **Purpose**
-Get matched jobs
+Get matched jobs based on user skills
 
 **Response**
 
@@ -205,88 +258,11 @@ Fetch saved jobs
 
 ---
 
-# 4. Interview APIs
+# 4. User API
 
 ---
 
-## 8. Start Interview
-
-**Endpoint**
-
-```
-POST /api/interview/start
-```
-
-**Purpose**
-Create interview session
-
-**Response**
-
-```
-{
-  interviewId
-}
-```
-
----
-
-## 9. Upload Interview Audio
-
-**Endpoint**
-
-```
-POST /api/interview/upload
-```
-
-**Purpose**
-Upload audio file
-
-**Request**
-Form-Data:
-
-```
-audio: file
-interviewId
-```
-
-**Response**
-
-```
-{
-  message
-}
-```
-
----
-
-## 10. Get Interview Feedback
-
-**Endpoint**
-
-```
-GET /api/interview/feedback/:interviewId
-```
-
-**Purpose**
-Get feedback
-
-**Response**
-
-```
-{
-  transcript,
-  feedback,
-  wordsPerMinute
-}
-```
-
----
-
-# 5. User API
-
----
-
-## 11. Get User Profile
+## 8. Get User Profile
 
 **Endpoint**
 
@@ -295,7 +271,7 @@ GET /api/user/profile
 ```
 
 **Purpose**
-Fetch user data
+Fetch user data including extracted resume skills
 
 **Response**
 
@@ -311,19 +287,18 @@ Fetch user data
 
 # Complete API Summary Table
 
-| Module    | APIs                    |
-| --------- | ----------------------- |
-| Auth      | register, login         |
-| Resume    | upload, get             |
-| Jobs      | match, save, saved      |
-| Interview | start, upload, feedback |
-| User      | profile                 |
+| Module   | APIs                    |
+| -------- | ----------------------- |
+| Auth     | register, login         |
+| Resume   | upload, get             |
+| Jobs     | match, save, saved      |
+| User     | profile                 |
 
 ---
 
 # Total APIs in MVP
 
-**11 APIs**
+**8 APIs** (Interview module removed)
 
 ---
 
@@ -334,4 +309,3 @@ If you want next, I can give:
 * Folder structure
 * API flow diagram
 * Complete backend architecture
-

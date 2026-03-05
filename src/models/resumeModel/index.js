@@ -61,6 +61,51 @@ const resumeSchema = new mongoose.Schema({
         experience: {
             type: [String],
             default: []
+        },
+
+        aiEnhanced: {
+            type: Boolean,
+            default: false
+        },
+
+        enhancedSkills: {
+            type: [String],
+            default: []
+        },
+
+        missingSkills: {
+            type: [String],
+            default: []
+        },
+
+        experienceSummary: {
+            type: String,
+            default: null
+        },
+
+        confidence: {
+            type: Number,
+            default: null
+        },
+
+        feedbackSummary: {
+            type: String,
+            default: null
+        },
+
+        strengths: {
+            type: [String],
+            default: []
+        },
+
+        recommendations: {
+            type: [String],
+            default: []
+        },
+
+        issues: {
+            type: [String],
+            default: []
         }
 
     },

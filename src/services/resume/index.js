@@ -5,6 +5,11 @@ const pdfParse = require("pdf-parse");
 const mammoth = require("mammoth");
 const nlp = require("compromise");
 const natural = require("natural");
+const { GoogleGenerativeAI } = require("@google/generative-ai");
+
+const genAI = process.env.GEMINI_API_KEY
+  ? new GoogleGenerativeAI(process.env.GEMINI_API_KEY)
+  : null;
 
 const extractTextFromFile = async (filePath, fileType) => {
   try {
@@ -100,6 +105,97 @@ const normalizeText = (rawText) => {
   return rawText.replace(/\s+/g, " ").trim();
 };
 
+const parseAiJson = (text) => {
+  if (!text) return null;
+  const match = text.match(/\{[\s\S]*\}/);
+  if (!match) return null;
+
+  try {
+    return JSON.parse(match[0]);
+  } catch (error) {
+    console.warn("Failed to parse AI JSON:", error.message);
+    return null;
+  }
+};
+
+const enhanceWithAI = async (rawText, nlpResults) => {
+  console.log("[AI] ==============================================");
+  console.log("[AI] Starting AI enhancement process...");
+  console.log("[AI] ----------------------------------------------");
+
+  // Check if Gemini API key is configured
+  if (!genAI) {
+    console.log("[AI] ❌ GEMINI_API_KEY not found in environment");
+    console.log("[AI] Skipping AI enhancement, using NLP results only");
+    console.log("[AI] ==============================================");
+    return null;
+  }
+
+  console.log("[AI] ✅ GEMINI_API_KEY found");
+  console.log("[AI] 📋 NLP Results before AI enhancement:");
+  console.log("[AI]    - Skills:", nlpResults.skills || []);
+  console.log("[AI]    - Role:", nlpResults.inferredRole || "Not detected");
+  console.log("[AI]    - Experience lines:", nlpResults.experience?.length || 0);
+
+  try {
+    const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
+    
+    console.log("[AI] 🤖 Calling Gemini API...");
+    const startTime = Date.now();
+
+    const prompt = `
+Analyze this resume and enhance the extracted data.
+Current NLP extraction:
+- Skills: ${(nlpResults.skills || []).join(", ")}
+- Role: ${nlpResults.inferredRole || ""}
+- Experience: ${(nlpResults.experience || []).join(" | ")}
+
+Resume text:
+${rawText.substring(0, 15000)}
+
+Return JSON with:
+{
+  "enhancedSkills": [...additional skills AI finds],
+  "refinedRole": "better job title if needed",
+  "experienceSummary": "2 years at X as Y",
+  "missingSkills": [...skills NLP missed],
+  "confidence": 0.0-1.0
+}
+`;
+
+    const result = await model.generateContent(prompt);
+    const duration = Date.now() - startTime;
+    console.log("[AI] ⏱️  Gemini API response time:", duration, "ms");
+
+    const responseText = result.response?.text() || "";
+    console.log("[AI] 📥 Raw AI response received");
+    console.log("[AI] 🔍 Parsing AI JSON response...");
+
+    const parsedResult = parseAiJson(responseText);
+
+    if (parsedResult) {
+      console.log("[AI] ✅ AI JSON parsed successfully!");
+      console.log("[AI]    - Enhanced Skills:", parsedResult.enhancedSkills || []);
+      console.log("[AI]    - Refined Role:", parsedResult.refinedRole || "No change");
+      console.log("[AI]    - Missing Skills:", parsedResult.missingSkills || []);
+      console.log("[AI]    - Confidence:", parsedResult.confidence || "N/A");
+      console.log("[AI] ==============================================");
+      return parsedResult;
+    } else {
+      console.log("[AI] ⚠️  AI response parsing failed - invalid JSON");
+      console.log("[AI]    Raw response:", responseText.substring(0, 200) + "...");
+      console.log("[AI] ==============================================");
+      return null;
+    }
+  } catch (error) {
+    console.log("[AI] ❌ AI enhancement failed!");
+    console.log("[AI]    Error:", error.message);
+    console.log("[AI]    Stack:", error.stack);
+    console.log("[AI] ==============================================");
+    return null;
+  }
+};
+
 const safeUnlink = (filePath) => {
   if (!filePath) return;
   fs.unlink(filePath, (err) => {
@@ -136,9 +232,17 @@ exports.uploadResumeService = async (userId, file) => {
       storagePath: file.path,
     };
 
+    console.log("\n[RESUME] =========================================");
+    console.log("[RESUME] 📄 Resume Upload Started");
+    console.log("[RESUME]    User ID:", userId);
+    console.log("[RESUME]    File:", file.originalname, `(${fileExtension.toUpperCase()}, ${(file.size / 1024).toFixed(1)}KB)`);
+
     const rawText = await extractTextFromFile(file.path, fileExtension);
+    console.log("[RESUME] 📝 Text extracted, length:", rawText.length, "chars");
+
     const normalizedText = normalizeText(rawText || "");
     if (!normalizedText) {
+      console.log("[RESUME] ❌ Failed to extract text from file");
       return {
         data: null,
         message: "Could not extract text from file",
@@ -146,27 +250,60 @@ exports.uploadResumeService = async (userId, file) => {
       };
     }
 
+    console.log("[RESUME] 🔧 Running NLP extraction...");
     const skills = await extractSkills(normalizedText);
     const education = extractEducation(rawText);
     const experience = extractExperience(rawText);
+    const inferredRole = inferRole(rawText);
 
-    const parsedData = {
+    console.log("[RESUME]    NLP Skills found:", skills.length);
+    console.log("[RESUME]    NLP Education lines:", education.length);
+    console.log("[RESUME]    NLP Experience lines:", experience.length);
+    console.log("[RESUME]    NLP Inferred role:", inferredRole || "None");
+
+    const nlpResults = {
       skills,
       education,
       experience,
+      inferredRole,
     };
 
-    const inferredRole = inferRole(rawText);
+    console.log("[RESUME] 🚀 Starting AI enhancement...");
+    const aiResults = await enhanceWithAI(rawText, nlpResults);
+    
+    const parsedData = {
+      ...nlpResults,
+      ...(aiResults || {}),
+      aiEnhanced: Boolean(aiResults),
+    };
 
+    if (aiResults) {
+      console.log("[RESUME] ✅ AI Enhancement successful!");
+      console.log("[RESUME]    Final role:", aiResults.refinedRole || inferredRole);
+    } else {
+      console.log("[RESUME] ℹ️  Using NLP results only (no AI enhancement)");
+    }
+
+    const finalInferredRole = aiResults?.refinedRole || inferredRole;
+
+    console.log("[RESUME] 💾 Saving resume to database...");
     const existingResume = await getResumeByUserId(userId);
     if (existingResume) {
+      console.log("[RESUME] 🗑️  Deleting old resume for user");
       safeUnlink(existingResume?.fileMeta?.storagePath);
       await deleteResume(userId);
     }
 
-    const resume = await createResume(userId, fileMeta, normalizedText, parsedData, inferredRole);
+    const resume = await createResume(
+      userId,
+      fileMeta,
+      normalizedText,
+      parsedData,
+      finalInferredRole
+    );
 
     if (!resume) {
+      console.log("[RESUME] ❌ Failed to create resume in database");
       return {
         data: null,
         message: "Couldn't create resume",
@@ -177,6 +314,11 @@ exports.uploadResumeService = async (userId, file) => {
     resume.processingStatus = "completed";
     await resume.save();
 
+    console.log("[RESUME] ✅ Resume uploaded successfully!");
+    console.log("[RESUME]    Resume ID:", resume._id);
+    console.log("[RESUME]    AI Enhanced:", parsedData.aiEnhanced ? "Yes" : "No");
+    console.log("[RESUME] =========================================\n");
+
     return {
       data: {
         resumeId: resume._id,
@@ -184,6 +326,7 @@ exports.uploadResumeService = async (userId, file) => {
         extractedRole: resume.inferredRole,
         education: resume.parsedData.education,
         experience: resume.parsedData.experience,
+        aiEnhanced: resume.parsedData.aiEnhanced,
         fileMeta: resume.fileMeta,
       },
       message: "Resume uploaded successfully",

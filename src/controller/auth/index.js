@@ -11,9 +11,9 @@ const { asyncHandler } = require("../../utils/asyncHandler/index");
 const ApiResponse = require("../../utils/apiResponse/index");
 
 exports.handleRegistration = asyncHandler(async (req, res) => {
-  const { username, password, email } = req.body;
+  const { username, password, email, location } = req.body;
 
-  const result = await registerUser(username, password, email);
+  const result = await registerUser(username, password, email, location);
 
   const { message, statusCode, data } = result;
   return res
@@ -33,7 +33,7 @@ exports.handleLogin = asyncHandler(async (req, res) => {
 
 exports.handleQuery = asyncHandler(async (req, res) => {
   const { email, username } = req.query;
-  const result = await readUser(email, username);
+  const result = await readUser({ email, username });
   const { message, statusCode, data } = result;
   return res
     .status(statusCode)
@@ -51,7 +51,7 @@ exports.handleId = asyncHandler(async (req, res) => {
 
 exports.handleUpdation = asyncHandler(async (req, res) => {
   const id = req.id;
-  const { updatedData } = req.body;
+  const updatedData = req.body?.updatedData ?? req.body;
 
   const { message, statusCode, data } = await updatedUser(id, updatedData);
   return res

@@ -1,7 +1,7 @@
 const {  checkUserExists, createUser,  checkPassword, signAccessToken, createToken, updateUser, deleteUser, checkUser, checkByUsername, checkById, checkAllUser } = require("../../repositories/auth");
 const bcrypt = require("bcrypt");
 
-exports.registerUser = async (username,password,email) =>{
+exports.registerUser = async (username,password,email,location) =>{
     if(!username||!password||!email){
         return {
             data:null,
@@ -23,7 +23,7 @@ exports.registerUser = async (username,password,email) =>{
     let hashedPassword = await bcrypt.hash(password,10);
     
 
-    user = await createUser(username,hashedPassword,email);
+    user = await createUser(username,hashedPassword,email,location);
     
     if(!user){
         return {

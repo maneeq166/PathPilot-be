@@ -3,8 +3,8 @@ const { User } = require("../../models/userModel");
 const jwt = require("jsonwebtoken");
 const bcrypt = require("bcrypt");
 
-exports.createUser = async (username, password, email) => {
-  return await User.create({ username, password, email });
+exports.createUser = async (username, password, email, location) => {
+  return await User.create({ username, password, email, location });
 };
 
 exports.verifyToken = (token) => {

@@ -1,7 +1,7 @@
 const express = require("express");
 const multer = require("multer");
 const router = express.Router();
-const { handleResumeUpload, handleResumeGet } = require("../../controller/resume");
+const { handleResumeUpload, handleResumeGet, handleCareerAdvice, handleResumeUpdate } = require("../../controller/resume");
 const { isUserOrAdmin } = require("../../middleware/authMiddleware/index");
 const { uploadMiddleware } = require("../../middleware/uploadMiddleware/index");
 const ApiResponse = require("../../utils/apiResponse/index");
@@ -40,6 +40,12 @@ router.route("/upload").post(
 
 // GET /api/resume - Get user's resume
 router.route("/").get(isUserOrAdmin, handleResumeGet);
+
+// PATCH /api/resume - Update user's resume
+router.route("/").patch(isUserOrAdmin, handleResumeUpdate);
+
+// POST /api/resume/advice - Get career advice based on resume
+router.route("/advice").post(isUserOrAdmin, handleCareerAdvice);
 
 module.exports = router;
 

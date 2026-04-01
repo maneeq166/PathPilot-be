@@ -5,18 +5,18 @@ exports.isUserOrAdmin = async (req, res, next) => {
   try {
     const token = req.headers.authorization?.split(" ")[1];
 
-    if (token === null || token === undefined) {
-      return res.status(400).json(new ApiResponse(400, null, "Access Denied"));
+    if (!token) {
+      return res.status(401).json(new ApiResponse(401, null, "Access Denied"));
     }
 
     const decodedToken = jwt.verify(token, process.env.JWT_SECRET);
-    
-    if (decodedToken === null || decodedToken === undefined) {
-      return res.status(400).json(new ApiResponse(400, null, "Access Denied"));
+
+    if (!decodedToken) {
+      return res.status(401).json(new ApiResponse(401, null, "Access Denied"));
     }
 
     if (decodedToken.role !== "user" && decodedToken.role !== "admin") {
-      return res.status(400).json(new ApiResponse(400, null, "Access Denied"));
+      return res.status(401).json(new ApiResponse(401, null, "Access Denied"));
     }
 
     console.log(decodedToken);
@@ -30,6 +30,9 @@ exports.isUserOrAdmin = async (req, res, next) => {
     next();
   } catch (error) {
     console.error("Error:", error);
+    if (error?.name === "JsonWebTokenError" || error?.name === "TokenExpiredError") {
+      return res.status(401).json(new ApiResponse(401, null, "Access Denied"));
+    }
     return res.status(500).json(new ApiResponse(500, null, "Server Error"));
   }
 };
@@ -39,13 +42,13 @@ exports.OnlyAdmin = async (req, res, next) => {
     const token = req.headers.authorization?.split(" ")[1];
 
     if (!token) {
-      return res.status(400).json(new ApiResponse(400, null, "Access Denied"));
+      return res.status(401).json(new ApiResponse(401, null, "Access Denied"));
     }
 
     const decodedToken = jwt.verify(token, process.env.JWT_SECRET);
 
     if (!decodedToken || decodedToken.role !== "admin") {
-      return res.status(400).json(new ApiResponse(400, null, "Access Denied"));
+      return res.status(401).json(new ApiResponse(401, null, "Access Denied"));
     }
 
     req.admin = decodedToken.role;
@@ -55,6 +58,9 @@ exports.OnlyAdmin = async (req, res, next) => {
     next();
   } catch (error) {
     console.error("Error:", error);
+    if (error?.name === "JsonWebTokenError" || error?.name === "TokenExpiredError") {
+      return res.status(401).json(new ApiResponse(401, null, "Access Denied"));
+    }
     return res.status(500).json(new ApiResponse(500, null, "Server Error"));
   }
 };

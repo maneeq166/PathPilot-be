@@ -1,16 +1,24 @@
 const Resume = require("../../models/resumeModel");
 
-exports.createResume = async (userId, fileMeta, rawText, parsedData, inferredRole) => {
+exports.createResume = async (userId, fileMeta, parsedData, inferredRole) => {
   try {
     const resume = new Resume({
       userId,
       fileMeta,
-      rawText,
       parsedData,
       inferredRole,
       processingStatus: "processing",
       matchingMeta: {
-        totalSkills: parsedData.skills ? parsedData.skills.length : 0,
+        totalSkills: parsedData.skills
+          ? [
+              ...(parsedData.skills.languages || []),
+              ...(parsedData.skills.frameworks || []),
+              ...(parsedData.skills.databases || []),
+              ...(parsedData.skills.tools || []),
+              ...(parsedData.skills.concepts || []),
+              ...(parsedData.skills.softSkills || [])
+            ].length
+          : 0,
         experienceLevel: "fresher"
       }
     });

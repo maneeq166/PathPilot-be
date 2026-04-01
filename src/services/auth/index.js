@@ -15,7 +15,7 @@ exports.registerUser = async (username,password,email,location) =>{
     if(user){
         return {
             data:null,
-            message:"Something went wrong",
+            message:"Email already exists",
             statusCode:400
         }
     }
@@ -33,10 +33,12 @@ exports.registerUser = async (username,password,email,location) =>{
         }
     }
 
+    const token = createToken(user._id, user.username, user.email, user.role);
+
     return {
-        data:username,
-        message:"User registered!",
-        statusCode:201
+        data: token,
+        message: "User registered!",
+        statusCode: 201
     }
 }
 
@@ -54,8 +56,8 @@ exports.loginUser = async(email,password) =>{
     if(!user){
         return {
             data:null,
-            message:"Account doesnt Exist",
-            statusCode:400
+            message:"Invalid credentials",
+            statusCode:401
         }
     }
 
@@ -64,8 +66,8 @@ exports.loginUser = async(email,password) =>{
     if(!correctPassword){
         return {
             data:null,
-            message:"Something went wrong",
-            statusCode:400
+            message:"Invalid credentials",
+            statusCode:401
         }
     }
 

@@ -13,16 +13,17 @@ const swaggerSpec = require("./src/config/swagger/index.js");
 const ApiResponse = require("./src/utils/apiResponse");
 const { connectToDatabase } = require("./src/config/connection/index");
 
-const { MONGODB_URI, NODE_ENV } = process.env;
+const { MONGODB_URI, NODE_ENV, JWT_SECRET } = process.env;
 const PORT = process.env.PORT || 5000;
 
-if (!MONGODB_URI || !NODE_ENV || !PORT) {
+if (!MONGODB_URI || !NODE_ENV || !PORT || !JWT_SECRET) {
   console.error(
-    "Missing required environment variables: MONGODB_URI, NODE_ENV, PORT",
+    "Missing required environment variables: MONGODB_URI, NODE_ENV, PORT, JWT_SECRET",
     {
       MONGODB_URI,
       NODE_ENV,
       PORT,
+      JWT_SECRET: JWT_SECRET ? "***" : undefined,
     }
   );
   process.exit(1);
@@ -71,9 +72,11 @@ if (NODE_ENV === "development") {
 }
 
 // Routes
-app.get("/", (req, res) => res.send("Welcome to the  API"));
-app.use("/api/auth",require("./src/routes/auth/index.js"));
-app.use("/api/resume",require("./src/routes/resume/index.js"));
+app.get("/", (req, res) => res.send("Welcome to the API"));
+app.use("/api/auth", require("./src/routes/auth/index.js"));
+app.use("/api/resume", require("./src/routes/resume/index.js"));
+app.use("/api/skill-feedback", require("./src/routes/skillFeedback/index.js"));
+app.use("/api/jobs", require("./src/routes/job/index.js"));
 
 
 //  404 Fallback

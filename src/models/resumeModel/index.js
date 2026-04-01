@@ -39,75 +39,53 @@ const resumeSchema = new mongoose.Schema({
 
     },
 
-    
-    rawText: {
-        type: String,
-        required: true
-    },
-
-    
     parsedData: {
-
+        rawText: { type: String, default: "" },
+        name: { type: String, default: "" },
+        contact: {
+            email: { type: String, default: "" },
+            phone: { type: String, default: "" },
+            linkedin: { type: String, default: "" },
+            github: { type: String, default: "" }
+        },
         skills: {
-            type: [String],
-            default: []
+            languages: { type: [String], default: [] },
+            frameworks: { type: [String], default: [] },
+            databases: { type: [String], default: [] },
+            tools: { type: [String], default: [] },
+            concepts: { type: [String], default: [] },
+            softSkills: { type: [String], default: [] }
         },
-
         education: {
-            type: [String],
+            type: [Object],
             default: []
         },
-
         experience: {
-            type: [String],
+            type: [Object],
             default: []
         },
-
-        aiEnhanced: {
-            type: Boolean,
-            default: false
-        },
-
-        enhancedSkills: {
-            type: [String],
+        projects: {
+            type: [Object],
             default: []
         },
-
-        missingSkills: {
-            type: [String],
-            default: []
-        },
-
-        experienceSummary: {
-            type: String,
-            default: null
-        },
-
-        confidence: {
-            type: Number,
-            default: null
-        },
-
-        feedbackSummary: {
-            type: String,
-            default: null
-        },
-
-        strengths: {
-            type: [String],
-            default: []
-        },
-
+        domain: { type: String, default: "" },
+        aiEnhanced: { type: Boolean, default: false },
+        enhancedSkills: { type: [String], default: [] },
+        missingSkills: { type: [String], default: [] },
+        experienceSummary: { type: String, default: "" },
+        confidence: { type: Number, default: null },
+        feedbackSummary: { type: String, default: "" },
+        strengths: { type: [String], default: [] },
+        issues: { type: [String], default: [] },
         recommendations: {
-            type: [String],
-            default: []
+            shortTermAdvice: { type: [String], default: [] },
+            longTermAdvice: { type: [String], default: [] },
+            missingSkills: { type: [String], default: [] }
         },
-
-        issues: {
-            type: [String],
-            default: []
+        validation: {
+            status: { type: String, default: "success" },
+            issues: { type: [String], default: [] }
         }
-
     },
     inferredRole: {
         type: String,

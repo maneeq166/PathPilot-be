@@ -76,10 +76,17 @@ const extractKeywords = (parsedData) => {
   return [...keywords];
 };
 
-const calculateSkillMatch = (jobDescription, userSkills) => {
-  if (!userSkills.length || !jobDescription) return 0;
+const buildJobText = (jobDescription, jobTitle, companyName) => {
+  return normalizeText(
+    [jobDescription, jobTitle, companyName].filter(Boolean).join(" ")
+  );
+};
+
+const calculateSkillMatch = (jobDescription, userSkills, jobTitle, companyName) => {
+  if (!userSkills.length) return 0;
   
-  const desc = normalizeText(jobDescription);
+  const desc = buildJobText(jobDescription, jobTitle, companyName);
+  if (!desc) return 0;
   let matched = 0;
   
   userSkills.forEach(skill => {
@@ -91,10 +98,9 @@ const calculateSkillMatch = (jobDescription, userSkills) => {
   return Math.round((matched / userSkills.length) * 100);
 };
 
-const calculateExperienceMatch = (jobDescription, userLevel) => {
-  if (!jobDescription) return 50;
-  
-  const desc = normalizeText(jobDescription);
+const calculateExperienceMatch = (jobDescription, userLevel, jobTitle) => {
+  const desc = buildJobText(jobDescription, jobTitle, "");
+  if (!desc) return 50;
   const levelMap = {
     "senior": { keywords: ["senior", "lead", "principal", "staff", "5+ years", "7+ years", "5-7 years"], weight: 80 },
     "mid": { keywords: ["mid-level", "intermediate", "3+ years", "3-5 years", "2-4 years"], weight: 70 },
@@ -120,8 +126,11 @@ const calculateExperienceMatch = (jobDescription, userLevel) => {
 };
 
 const calculateOverallMatch = (job, userProfile) => {
-  const skillScore = calculateSkillMatch(job.job_description || job.description || "", userProfile.skills);
-  const experienceScore = calculateExperienceMatch(job.job_description || job.description || "", userProfile.experienceLevel);
+  const description = job.job_description || job.description || "";
+  const title = job.job_title || job.title || "";
+  const company = job.company_name || job.company || "";
+  const skillScore = calculateSkillMatch(description, userProfile.skills, title, company);
+  const experienceScore = calculateExperienceMatch(description, userProfile.experienceLevel, title);
   
   const weights = {
     skill: 0.6,
@@ -136,14 +145,15 @@ const calculateOverallMatch = (job, userProfile) => {
     overall: Math.max(10, overall),
     skillMatch: skillScore,
     experienceMatch: experienceScore,
-    matchedSkills: findMatchedSkills(job.job_description || job.description || "", userProfile.skills),
+    matchedSkills: findMatchedSkills(description, userProfile.skills, title, company),
   };
 };
 
-const findMatchedSkills = (jobDescription, userSkills) => {
-  if (!userSkills.length || !jobDescription) return [];
+const findMatchedSkills = (jobDescription, userSkills, jobTitle, companyName) => {
+  if (!userSkills.length) return [];
   
-  const desc = normalizeText(jobDescription);
+  const desc = buildJobText(jobDescription, jobTitle, companyName);
+  if (!desc) return [];
   return userSkills.filter(skill => desc.includes(skill.toLowerCase()));
 };
 

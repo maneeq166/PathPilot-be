@@ -1,4 +1,5 @@
 const cheerio = require("cheerio");
+const { scoreAndSortJobs } = require("./resumeMatcher");
 const {
   getRandomProxy,
   getRandomUA,
@@ -155,6 +156,114 @@ const fetchNaukriHtml = async (url) => {
   return "";
 };
 
+const extractJobsFromJson = (data, limit = 200) => {
+  const results = [];
+  const seen = new Set();
+  const queue = [{ value: data, depth: 0 }];
+  const MAX_DEPTH = 6;
+
+  const pushJob = (job) => {
+    const title = safeText(job.title || job.jobTitle || job.job_title || "");
+    const company = safeText(job.companyName || job.company || job.recruiterName || "");
+    if (!title || !company) return;
+    const url = job.url || job.jdURL || job.jobDetailUrl || job.applyUrl || "";
+    const key = `${title}|${company}|${url}`.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    results.push({
+      source: "Naukri",
+      company_name: company,
+      job_title: title,
+      location: safeText(job.location || job.jobLocation || job.loc || "India"),
+      job_url: url || "",
+    });
+  };
+
+  while (queue.length && results.length < limit) {
+    const { value, depth } = queue.shift();
+    if (!value || depth > MAX_DEPTH) continue;
+
+    if (Array.isArray(value)) {
+      if (value.length && typeof value[0] === "object") {
+        value.forEach((item) => {
+          if (item && typeof item === "object") {
+            pushJob(item);
+          }
+        });
+      }
+      value.forEach((item) => {
+        if (item && typeof item === "object") queue.push({ value: item, depth: depth + 1 });
+      });
+    } else if (typeof value === "object") {
+      Object.values(value).forEach((item) => {
+        if (item && typeof item === "object") queue.push({ value: item, depth: depth + 1 });
+      });
+    }
+  }
+
+  return results;
+};
+
+const fetchNaukriJobsViaBrowser = async (url) => {
+  const jobs = [];
+  let jsonResponses = 0;
+  let jobHits = 0;
+
+  try {
+    const browser = await puppeteer.launch({
+      headless: "new",
+      args: [
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-gpu",
+        "--window-size=1920,1080",
+      ],
+    });
+    const page = await browser.newPage();
+    await page.setViewport({ width: 1920, height: 1080 });
+    await page.setUserAgent(getRandomUA());
+
+    page.on("response", async (response) => {
+      try {
+        const headers = response.headers() || {};
+        const contentType = headers["content-type"] || "";
+        if (!contentType.includes("application/json")) return;
+        jsonResponses += 1;
+        const data = await response.json();
+        const extracted = extractJobsFromJson(data);
+        if (extracted.length > 0) {
+          jobHits += extracted.length;
+          jobs.push(...extracted);
+        }
+      } catch (_) {
+        // ignore JSON parse failures
+      }
+    });
+
+    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
+    await delay(3000);
+    await autoScroll(page);
+    await delay(3000);
+
+    await browser.close();
+  } catch (err) {
+    console.warn(`[Naukri] Puppeteer JSON capture failed: ${err.message}`);
+  }
+
+  const deduped = [];
+  const seen = new Set();
+  jobs.forEach((job) => {
+    const key = `${job.job_title}|${job.company_name}|${job.job_url}`.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    deduped.push(job);
+  });
+
+  console.log(`[Naukri] JSON responses inspected: ${jsonResponses}, job hits: ${jobHits}, unique jobs: ${deduped.length}`);
+  return deduped;
+};
+
 async function fetchWithProxy(url, options = {}) {
   let proxy = null;
   
@@ -202,21 +311,41 @@ async function fetchWithProxy(url, options = {}) {
   }
 }
 
-const scrapeLinkedIn = async (query, location, portal) => {
+const normalizeLinkedInJobUrl = (url) => {
+  if (!url) return "";
+  const cleaned = url.startsWith("http") ? url : `https://www.linkedin.com${url}`;
+  const noHash = cleaned.split("#")[0];
+  return noHash.split("?")[0];
+};
+
+const buildLinkedInJobKey = (job) => [
+  job.job_title,
+  job.company_name,
+  job.job_url,
+]
+  .filter(Boolean)
+  .join("|")
+  .toLowerCase();
+
+const scrapeLinkedIn = async (query, location, portal, options = {}) => {
   console.log(`\n========== LinkedIn Scraper ==========`);
   console.log(`Query: "${query}", Location: "${location}"`);
   console.log(`Portal: ${portal.name}`);
 
-  let puppeteerCore;
-  try {
-    puppeteerCore = require("puppeteer");
-  } catch (error) {
-    console.error(`[LinkedIn] Puppeteer not installed: ${error.message}`);
+  if (!puppeteer) {
+    console.error(`[LinkedIn] Puppeteer not installed.`);
     return [];
   }
 
-  const searchUrl = `https://www.linkedin.com/jobs/search/?keywords=${encodeURIComponent(query)}&location=${encodeURIComponent(location || "United States")}&f_TPR=r2592000&f_LF=f_AL&sortBy=DD`;
-  console.log(`[LinkedIn] URL: ${searchUrl}`);
+  const {
+    maxPages = 1,
+    targetHighMatch = 0,
+    minMatchScore = 70,
+    userProfile = null,
+  } = options;
+
+  const buildSearchUrl = (start = 0) =>
+    `https://www.linkedin.com/jobs/search/?keywords=${encodeURIComponent(query)}&location=${encodeURIComponent(location || "United States")}&f_TPR=r2592000&f_LF=f_AL&sortBy=DD&start=${start}`;
 
   let browser;
   try {
@@ -241,7 +370,7 @@ const scrapeLinkedIn = async (query, location, portal) => {
       ],
     };
 
-    browser = await puppeteerCore.launch(launchOptions);
+    browser = await puppeteer.launch(launchOptions);
 
     const page = await browser.newPage();
     await page.setViewport({ width: 1920, height: 1080 });
@@ -256,114 +385,178 @@ const scrapeLinkedIn = async (query, location, portal) => {
     const ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36";
     await page.setUserAgent(ua);
 
-    console.log(`[LinkedIn] Navigating to page...`);
-    
-    try {
-      await page.goto(searchUrl, { waitUntil: "networkidle2", timeout: 60000 });
-      console.log(`[LinkedIn] Page loaded`);
-    } catch (navError) {
-      console.warn(`[LinkedIn] Navigation: ${navError.message}`);
-      await delay(5000);
-    }
+    const collected = [];
+    const seen = new Set();
+    let highMatchCount = 0;
 
-    await delay(3000);
+    for (let pageIndex = 0; pageIndex < maxPages; pageIndex += 1) {
+      const start = pageIndex * 25;
+      const searchUrl = buildSearchUrl(start);
 
-    const pageCheck = await page.evaluate(() => {
-      return {
-        hasCaptcha: document.body.innerText.toLowerCase().includes('captcha') || 
-                    document.body.innerText.toLowerCase().includes('verify you are human') ||
-                    document.body.innerText.toLowerCase().includes('unusual traffic'),
-        hasJobs: document.querySelectorAll('.job-card-container, [data-job-id], .jobs-search-results__list-item').length,
-        title: document.title,
-      };
-    });
+      console.log(`[LinkedIn] Page ${pageIndex + 1}/${maxPages}: ${searchUrl}`);
+      console.log(`[LinkedIn] Navigating to page...`);
 
-    console.log(`[LinkedIn] Check: captcha=${pageCheck.hasCaptcha}, jobs=${pageCheck.hasJobs}`);
+      try {
+        await page.goto(searchUrl, { waitUntil: "networkidle2", timeout: 60000 });
+        console.log(`[LinkedIn] Page loaded`);
+      } catch (navError) {
+        console.warn(`[LinkedIn] Navigation: ${navError.message}`);
+      }
 
-    if (pageCheck.hasCaptcha) {
-      console.log(`[LinkedIn] Blocked by captcha, trying scroll...`);
-      await page.evaluate(() => window.scrollTo(0, 500));
+      await page.waitForSelector("body", { timeout: 15000 }).catch(() => {});
       await delay(2000);
-    }
 
-    if (pageCheck.hasJobs > 0) {
-      console.log(`[LinkedIn] Found ${pageCheck.hasJobs} job cards, extracting...`);
-    }
+      await page.waitForFunction(() => {
+        return document.querySelectorAll(
+          ".jobs-search-results__list-item, .job-card-container, [data-job-id], .base-card, .jobs-search__results-list li"
+        ).length > 0;
+      }, { timeout: 15000 }).catch(() => {});
 
-    console.log(`[LinkedIn] Extracting job cards...`);
-    
-    const jobs = await page.evaluate(() => {
-      const results = [];
-      
-      document.querySelectorAll('.job-card-container').forEach((card) => {
-        const link = card.querySelector('a[href*="/jobs/view"]');
-        const title = card.querySelector('h3')?.textContent?.trim() || 
-                      link?.textContent?.trim() || "";
-        const company = card.querySelector('.job-card-container__company-name, .subtle')?.textContent?.trim() || "";
-        const location = card.querySelector('.job-card-container__metadata-item')?.textContent?.trim() || "";
-        
-        if (title && company) {
-          results.push({
-            job_title: title,
-            company_name: company,
-            location: location || "Remote",
-            job_url: link?.href ? (link.href.startsWith('http') ? link.href : 'https://www.linkedin.com' + link.href) : "",
-          });
-        }
+      // Nudge lazy loading
+      for (let i = 0; i < 3; i += 1) {
+        await autoScroll(page);
+        await delay(1500);
+      }
+
+      const pageCheck = await page.evaluate(() => {
+        const bodyText = document.body?.innerText?.toLowerCase() || "";
+        return {
+          hasCaptcha: bodyText.includes("captcha") ||
+            bodyText.includes("verify you are human") ||
+            bodyText.includes("unusual traffic"),
+          hasJobs: document.querySelectorAll(
+            ".jobs-search-results__list-item, .job-card-container, [data-job-id], .base-card, .jobs-search__results-list li"
+          ).length,
+          title: document.title,
+        };
       });
 
-      if (results.length === 0) {
-        document.querySelectorAll('[data-job-id]').forEach((card) => {
-          const link = card.querySelector('a[href*="/jobs/view"]');
-          const title = link?.textContent?.trim() || card.querySelector('h3, .title')?.textContent?.trim() || "";
-          const company = card.querySelector('.company, .company-name, [class*="company"]')?.textContent?.trim() || "";
-          
+      console.log(`[LinkedIn] Check: captcha=${pageCheck.hasCaptcha}, jobs=${pageCheck.hasJobs}`);
+
+      if (pageCheck.hasCaptcha) {
+        console.log(`[LinkedIn] Blocked by captcha, trying scroll...`);
+        await page.evaluate(() => window.scrollTo(0, 500));
+        await delay(2000);
+      }
+
+      if (pageCheck.hasJobs > 0) {
+        console.log(`[LinkedIn] Found ${pageCheck.hasJobs} job cards, extracting...`);
+      }
+
+      console.log(`[LinkedIn] Extracting job cards...`);
+      
+      const jobs = await page.evaluate(() => {
+        const results = [];
+        const cards = Array.from(document.querySelectorAll(
+          ".jobs-search-results__list-item, .job-card-container, [data-job-id], .base-card, .jobs-search__results-list li"
+        ));
+
+        const pickText = (el, selectors) => {
+          for (const sel of selectors) {
+            const node = el.querySelector(sel);
+            const text = node?.textContent?.trim();
+            if (text) return text;
+          }
+          return "";
+        };
+
+        cards.forEach((card) => {
+          const link = card.querySelector('a.base-card__full-link, a[href*="/jobs/view"]');
+          const title = pickText(card, [
+            ".base-search-card__title",
+            "h3",
+            ".job-card-list__title",
+            "[class*='job-card'] h3",
+          ]) || link?.textContent?.trim() || "";
+          const company = pickText(card, [
+            ".base-search-card__subtitle",
+            ".job-card-container__company-name",
+            "[class*='company']",
+            ".subtle",
+            "h4",
+          ]);
+          const location = pickText(card, [
+            ".job-search-card__location",
+            ".job-card-container__metadata-item",
+            "[class*='location']",
+          ]);
+
           if (title && company) {
             results.push({
               job_title: title,
               company_name: company,
-              location: "Remote",
+              location: location || "Remote",
               job_url: link?.href || "",
             });
           }
         });
+
+        if (results.length === 0) {
+          document.querySelectorAll('a[href*="/jobs/view"]').forEach((link) => {
+            const card = link.closest("li, article, .job, [data-job-id]");
+            const title = link.textContent?.trim() || "";
+            const company = card?.querySelector("[class*='company'], .base-search-card__subtitle, h4")?.textContent?.trim() || "";
+            const location = card?.querySelector("[class*='location'], .job-search-card__location")?.textContent?.trim() || "";
+
+            if (title && company && title.length < 200) {
+              results.push({
+                job_title: title,
+                company_name: company,
+                location: location || "Remote",
+                job_url: link.href || "",
+              });
+            }
+          });
+        }
+
+        return results;
+      });
+
+      const validJobs = jobs
+        .map((job) => ({
+          ...job,
+          job_url: normalizeLinkedInJobUrl(job.job_url),
+        }))
+        .filter((j) => j.job_title && j.company_name && j.job_url);
+
+      const beforeCount = collected.length;
+      validJobs.forEach((job) => {
+        const key = buildLinkedInJobKey(job);
+        if (!key || seen.has(key)) return;
+        seen.add(key);
+        collected.push(job);
+      });
+
+      let scored = collected;
+      if (userProfile) {
+        scored = scoreAndSortJobs(collected, userProfile);
+        highMatchCount = scored.filter((job) => job.matchScore?.overall >= minMatchScore).length;
       }
 
-      if (results.length === 0) {
-        document.querySelectorAll('a[href*="/jobs/view/?"]').forEach((link) => {
-          const card = link.closest('li, article, .job, [data-job-id]');
-          const title = link.textContent?.trim() || "";
-          const company = card?.querySelector('.company, [class*="company"]')?.textContent?.trim() || 
-                        card?.querySelector('[class*="subtitle"]')?.textContent?.trim() || "";
-          
-          if (title && company && title.length < 200) {
-            results.push({
-              job_title: title,
-              company_name: company,
-              location: "Remote",
-              job_url: link.href || "",
-            });
-          }
-        });
+      console.log(`[LinkedIn] Page ${pageIndex + 1} summary: jobsFound=${validJobs.length}, uniqueTotal=${collected.length}, highMatchCount=${highMatchCount}`);
+
+      if (collected.length === beforeCount) {
+        console.log(`[LinkedIn] Stopping: no new jobs on this page`);
+        break;
       }
 
-      return results;
-    });
+      if (targetHighMatch && highMatchCount >= targetHighMatch) {
+        console.log(`[LinkedIn] Stopping: reached ${targetHighMatch} high-match jobs`);
+        break;
+      }
+    }
 
-    const validJobs = jobs.filter((j) => j.job_title && j.company_name && j.job_url);
-    const uniqueJobs = validJobs.filter((job, idx, arr) => 
-      arr.findIndex(j => j.job_title === job.job_title && j.company_name === job.company_name) === idx
-    );
-
-    console.log(`[LinkedIn] Valid unique jobs: ${uniqueJobs.length}`);
+    const finalJobs = userProfile ? scoreAndSortJobs(collected, userProfile) : collected;
+    console.log(`[LinkedIn] Valid unique jobs: ${finalJobs.length}`);
     console.log(`=====================================\n`);
 
-    return uniqueJobs.map((job) => ({
+    return finalJobs.map((job) => ({
       source: "LinkedIn",
       company_name: safeText(job.company_name),
       job_title: safeText(job.job_title),
       location: safeText(job.location) || "Remote",
-      job_url: job.job_url,
+      job_url: normalizeLinkedInJobUrl(job.job_url),
+      matchScore: job.matchScore,
     }));
 
   } catch (error) {
@@ -381,7 +574,11 @@ const scrapeNaukri = async (query, location, portal, options = {}) => {
   console.log(`\n========== Naukri Scraper ==========`);
   console.log(`Query: "${query}", Location: "${location}"`);
 
-  const baseUrl = fillUrl(portal.baseUrl, toSlug(query), toSlug(location));
+  const querySlug = toSlug(query);
+  const locationSlug = toSlug(location);
+  const baseUrl = locationSlug
+    ? fillUrl(portal.baseUrl, querySlug, locationSlug)
+    : `https://www.naukri.com/${querySlug}-jobs`;
   const urlObj = new URL(baseUrl);
 
   if (options.roleCatId) {
@@ -410,9 +607,24 @@ const scrapeNaukri = async (query, location, portal, options = {}) => {
 
     const $ = cheerio.load(html);
 
+    const pageTitle = $("title").first().text().trim();
+    if (pageTitle) {
+      console.log(`[Naukri] Title: ${pageTitle}`);
+    }
+    const robots = $('meta[name="robots"]').attr("content");
+    if (robots) {
+      console.log(`[Naukri] Robots: ${robots}`);
+    }
+
     console.log(`[Naukri] Trying selectors...`);
     
     let results = [];
+    const selectorCounts = {
+      dataJobId: $("[data-job-id]").length,
+      jobTuple: $(".jobTuple").length,
+      genericJob: $("article, .job-item, [class*='job']").length,
+    };
+    console.log(`[Naukri] Selector counts: data-job-id=${selectorCounts.dataJobId}, jobTuple=${selectorCounts.jobTuple}, generic=${selectorCounts.genericJob}`);
     
     $("[data-job-id]").each((_, el) => {
       const title = safeText($(el).find(".title").text());
@@ -467,12 +679,218 @@ const scrapeNaukri = async (query, location, portal, options = {}) => {
       });
     }
 
+    if (results.length === 0) {
+      console.log(`[Naukri] No jobs found via selectors, trying embedded data...`);
+      const embeddedJobs = [];
+
+      const nextData = $("#__NEXT_DATA__").html();
+      if (nextData) {
+        console.log(`[Naukri] __NEXT_DATA__ present (${nextData.length} chars)`);
+      }
+
+      const jsonCandidates = [
+        { label: "__NEXT_DATA__", raw: nextData },
+        { label: "__INITIAL_STATE__", match: html.match(/window\.__INITIAL_STATE__\s*=\s*({[\s\S]*?});/i) },
+        { label: "__PRELOADED_STATE__", match: html.match(/window\.__PRELOADED_STATE__\s*=\s*({[\s\S]*?});/i) },
+        { label: "__NUXT__", match: html.match(/window\.__NUXT__\s*=\s*({[\s\S]*?});/i) },
+      ];
+
+      for (const candidate of jsonCandidates) {
+        const raw = candidate.raw || (candidate.match && candidate.match[1]);
+        if (!raw) continue;
+        try {
+          const data = JSON.parse(raw.trim());
+          const possibleLists = [];
+
+          if (data?.props?.pageProps?.initialState?.search?.results?.jobs) {
+            possibleLists.push(data.props.pageProps.initialState.search.results.jobs);
+          }
+          if (data?.props?.pageProps?.jobs?.data) {
+            possibleLists.push(data.props.pageProps.jobs.data);
+          }
+          if (data?.search?.results?.jobs) {
+            possibleLists.push(data.search.results.jobs);
+          }
+          if (data?.jobs) {
+            possibleLists.push(data.jobs);
+          }
+          if (data?.state?.jobs) {
+            possibleLists.push(data.state.jobs);
+          }
+
+          possibleLists
+            .filter((list) => Array.isArray(list))
+            .forEach((list) => {
+              list.forEach((job) => {
+                embeddedJobs.push({
+                  source: "Naukri",
+                  company_name: job.companyName || job.company || job.recruiterName || "",
+                  job_title: job.title || job.jobTitle || job.job_title || "",
+                  location: job.location || job.jobLocation || job.loc || "India",
+                  job_url: job.url || job.jdURL || job.jobDetailUrl || job.applyUrl || "",
+                });
+              });
+            });
+        } catch (err) {
+          console.warn(`[Naukri] Failed parsing ${candidate.label}: ${err.message}`);
+        }
+        if (embeddedJobs.length > 0) break;
+      }
+
+      if (embeddedJobs.length === 0) {
+        const ldJsonScripts = $('script[type="application/ld+json"]').toArray();
+        console.log(`[Naukri] ld+json scripts: ${ldJsonScripts.length}`);
+        ldJsonScripts.forEach((el) => {
+          const raw = $(el).html();
+          if (!raw) return;
+          try {
+            const data = JSON.parse(raw.trim());
+            const stack = Array.isArray(data) ? data : [data];
+            stack.forEach((entry) => {
+              if (!entry) return;
+              if (entry["@type"] === "JobPosting") {
+                embeddedJobs.push({
+                  source: "Naukri",
+                  company_name: entry?.hiringOrganization?.name || "",
+                  job_title: entry?.title || "",
+                  location: entry?.jobLocation?.address?.addressLocality || "India",
+                  job_url: entry?.url || "",
+                });
+              }
+              if (Array.isArray(entry["@graph"])) {
+                entry["@graph"].forEach((node) => {
+                  if (node["@type"] !== "JobPosting") return;
+                  embeddedJobs.push({
+                    source: "Naukri",
+                    company_name: node?.hiringOrganization?.name || "",
+                    job_title: node?.title || "",
+                    location: node?.jobLocation?.address?.addressLocality || "India",
+                    job_url: node?.url || "",
+                  });
+                });
+              }
+            });
+          } catch (err) {
+            console.warn(`[Naukri] Failed parsing ld+json: ${err.message}`);
+          }
+        });
+      }
+
+      if (embeddedJobs.length > 0) {
+        results = embeddedJobs.filter((job) => job.job_title && job.company_name);
+      } else {
+        const bodySnippet = $("body").text().replace(/\s+/g, " ").slice(0, 200);
+        if (bodySnippet) {
+          console.log(`[Naukri] Body snippet: ${bodySnippet}`);
+        }
+      }
+    }
+
+    if (results.length === 0) {
+      console.log(`[Naukri] Trying browser JSON capture fallback...`);
+      const browserJobs = await fetchNaukriJobsViaBrowser(url);
+      if (browserJobs.length > 0) {
+        results = browserJobs;
+      }
+    }
+
     console.log(`[Naukri] Found ${results.length} jobs`);
     console.log(`=================================\n`);
 
     return results;
   } catch (error) {
     console.error(`[Naukri] Error: ${error.message}`);
+    return [];
+  }
+};
+
+const scrapeIndeedViaBrowser = async (query, location, portal) => {
+  console.log(`\n========== Indeed Browser Scraper ==========`);
+  const url = fillUrl(portal.baseUrl, query, location);
+  console.log(`[IndeedBrowser] URL: ${url}`);
+
+  try {
+    if (!puppeteer) {
+      console.warn(`[IndeedBrowser] Puppeteer not available`);
+      return [];
+    }
+
+    const browser = await puppeteer.launch({
+      headless: "new",
+      args: [
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-gpu",
+        "--window-size=1920,1080",
+      ],
+    });
+
+    const page = await browser.newPage();
+    await page.setViewport({ width: 1920, height: 1080 });
+    await page.setUserAgent(getRandomUA());
+    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
+    await delay(3000);
+    await autoScroll(page);
+    await delay(2000);
+
+    const html = await page.content();
+    await browser.close();
+
+    if (isBlockedPageContent(html)) {
+      logPortalBlocked("Indeed", "browser render verification page");
+      return [];
+    }
+
+    const $ = cheerio.load(html);
+    const results = [];
+
+    $(".job_seen_beacon").each((_, el) => {
+      const title = safeText($(el).find("h2.jobTitle span, h2 a").text());
+      const company = safeText($(el).find(".companyName").text());
+      const loc = safeText($(el).find(".companyLocation").text());
+      const jobUrl = $(el).find("a").attr("href");
+
+      if (title && company) {
+        results.push({
+          source: "Indeed",
+          company_name: company,
+          job_title: title,
+          location: loc || "Remote",
+          job_url: jobUrl ? `https://in.indeed.com${jobUrl}` : "",
+        });
+      }
+    });
+
+    if (results.length === 0) {
+      $("[data-jk]").each((_, el) => {
+        const $el = $(el);
+        const title = safeText($el.find("h2 a span, .jobTitle span").first().text());
+        const company = safeText($el.find(".company").text());
+        const loc = safeText($el.find(".location").text());
+        const jk = $el.attr("data-jk");
+
+        if (title && company) {
+          results.push({
+            source: "Indeed",
+            company_name: company,
+            job_title: title,
+            location: loc || "Remote",
+            job_url: jk ? `https://in.indeed.com/viewjob?jk=${jk}` : "",
+          });
+        }
+      });
+    }
+
+    const unique = results.filter((job, idx, arr) =>
+      arr.findIndex(j => j.job_title === job.job_title && j.company_name === job.company_name) === idx
+    );
+
+    console.log(`[IndeedBrowser] Found ${unique.length} unique jobs`);
+    console.log(`========================================\n`);
+    return unique;
+  } catch (error) {
+    console.error(`[IndeedBrowser] Error: ${error.message}`);
     return [];
   }
 };
@@ -488,8 +906,8 @@ const scrapeIndeed = async (query, location, portal) => {
     const { response, success } = await fetchWithProxy(url);
     
     if (!success || !response) {
-      console.warn(`[Indeed] Fetch failed`);
-      return [];
+      console.warn(`[Indeed] Fetch failed, trying browser fallback`);
+      return await scrapeIndeedViaBrowser(query, location, portal);
     }
 
     console.log(`[Indeed] Response status: ${response.status}`);
@@ -498,7 +916,7 @@ const scrapeIndeed = async (query, location, portal) => {
 
     if (isBlockedPageContent(html)) {
       logPortalBlocked("Indeed", "captcha or verification page");
-      return [];
+      return await scrapeIndeedViaBrowser(query, location, portal);
     }
 
     const $ = cheerio.load(html);
@@ -682,7 +1100,7 @@ const runScraper = async (portal, query, location, options = {}) => {
     let jobs = [];
     switch (portal.scraper) {
       case "linkedin":
-        jobs = await scrapeLinkedIn(query, location, portal);
+        jobs = await scrapeLinkedIn(query, location, portal, options);
         break;
       case "naukri":
         jobs = await scrapeNaukri(query, location, portal, options);

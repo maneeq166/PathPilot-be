@@ -54,6 +54,17 @@ const normalizeJob = (job, context = {}) => ({
   job_type: normalizeText(job.employmentType || job.job_type),
 });
 
+const buildJobKey = (job) => [
+  job.source,
+  job.job_url,
+  job.company_name,
+  job.job_title,
+  job.location,
+]
+  .filter(Boolean)
+  .join("|")
+  .toLowerCase();
+
 const buildMockJobs = (query, location) => [
   {
     title: `${query || "Software"} Engineer`,
@@ -110,6 +121,9 @@ exports.scrapeJobsService = async ({
 
   const safeLimit = Math.min(Math.max(Number(limit) || 15, 1), 15);
   const MIN_MATCH_SCORE = 70;
+  const LINKEDIN_ONLY_TARGET = 2;
+  const sourceLower = (source || "").toLowerCase();
+  const isLinkedInOnly = sourceLower === "linkedin";
 
   const userProfile = userResume ? {
     skills: extractSkills(userResume),
@@ -140,15 +154,26 @@ exports.scrapeJobsService = async ({
 
   console.log(`\n--- PHASE 1: Portal Scraping (Priority Order) ---\n`);
   for (const portal of sortedPortals) {
-    if (source && source !== "all" && source.toLowerCase() !== portal.name.toLowerCase()) {
-      continue;
+    if (source && source !== "all") {
+      if (isLinkedInOnly) {
+        if (!portal.name.toLowerCase().includes("linkedin")) continue;
+      } else if (sourceLower !== portal.name.toLowerCase()) {
+        continue;
+      }
     }
 
     try {
+      const isLinkedIn = portal.name.toLowerCase().includes("linkedin");
       const jobs = await runScraper(portal, query, location, {
         roleCatId,
         cityTypeGid,
         wfhType,
+        ...(isLinkedIn ? {
+          maxPages: 5,
+          targetHighMatch: isLinkedInOnly ? LINKEDIN_ONLY_TARGET : 5,
+          minMatchScore: MIN_MATCH_SCORE,
+          userProfile,
+        } : {}),
       });
       totalScraped += jobs.length;
       
@@ -179,11 +204,15 @@ exports.scrapeJobsService = async ({
   console.log(`\nLinkedIn jobs: ${linkedInJobs.length}`);
   console.log(`Other portal jobs: ${otherPortalJobs.length}`);
 
+  if (isLinkedInOnly) {
+    console.log(`[LinkedInOnly] Skipping API and non-LinkedIn sources`);
+  }
+
   console.log(`\n--- PHASE 2: API Sources (Primary when scraping fails) ---\n`);
   
   const apiJobs = [];
   
-  if (process.env.J_SEARCH_API_KEY && process.env.J_SEARCH_API_KEY !== "your_rapidapi_key_here") {
+  if (!isLinkedInOnly && process.env.J_SEARCH_API_KEY && process.env.J_SEARCH_API_KEY !== "your_rapidapi_key_here") {
     console.log(`[Priority] Using JSearch API (aggregates LinkedIn jobs)`);
     const { fetchJSearch } = require("./fallbackAPI");
     const jsearchJobs = await fetchJSearch(query, location, safeLimit * 2);
@@ -196,11 +225,11 @@ exports.scrapeJobsService = async ({
       });
       console.log(`[JSearch] Got ${jsearchJobs.length} jobs`);
     }
-  } else {
+  } else if (!isLinkedInOnly) {
     console.log(`[JSearch] No API key configured`);
   }
   
-  const fallbackJobs = await getFallbackJobs(query, location, safeLimit * 2);
+  const fallbackJobs = isLinkedInOnly ? [] : await getFallbackJobs(query, location, safeLimit * 2);
   
   const fallbackWithMeta = fallbackJobs.map((job) => ({
     ...job,
@@ -209,16 +238,18 @@ exports.scrapeJobsService = async ({
   
   console.log(`Fallback APIs: ${fallbackJobs.length} jobs`);
 
-  const allRawJobs = [
-    ...linkedInJobs,
-    ...apiJobs,
-    ...otherPortalJobs,
-    ...fallbackWithMeta,
-  ];
+  const allRawJobs = isLinkedInOnly
+    ? [...linkedInJobs]
+    : [
+      ...linkedInJobs,
+      ...apiJobs,
+      ...otherPortalJobs,
+      ...fallbackWithMeta,
+    ];
 
   console.log(`\n--- TOTAL: ${allRawJobs.length} raw jobs ---\n`);
 
-  let normalized = dedupeJobs(
+  const allNormalized = dedupeJobs(
     allRawJobs.map((job) =>
       normalizeJob(job, {
         source: job.source,
@@ -230,6 +261,18 @@ exports.scrapeJobsService = async ({
     )
   );
 
+  let normalized = allNormalized;
+  const linkedInPoolSorted = allNormalized.length > 0 && userProfile
+    ? scoreAndSortJobs(
+      allNormalized.filter((job) =>
+        (job.source || "").toLowerCase().includes("linkedin")
+      ),
+      userProfile
+    )
+    : allNormalized.filter((job) =>
+      (job.source || "").toLowerCase().includes("linkedin")
+    );
+
   if (userProfile && normalized.length > 0) {
     normalized = scoreAndSortJobs(normalized, userProfile);
     console.log(`[Matching] Scored and sorted ${normalized.length} jobs`);
@@ -238,8 +281,60 @@ exports.scrapeJobsService = async ({
     const belowThreshold = normalized.filter((job) => !job.matchScore?.overall || job.matchScore?.overall < MIN_MATCH_SCORE);
     
     console.log(`[Matching] Jobs with ${MIN_MATCH_SCORE}+% match: ${highMatchJobs.length}`);
-    
-    normalized = [...highMatchJobs, ...belowThreshold.slice(0, 5)];
+
+    const curated = [];
+    const seen = new Set();
+    const addJobs = (jobs, options = {}) => {
+      const { limitTotal, limitLinkedIn } = options;
+      for (const job of jobs) {
+        const key = buildJobKey(job);
+        if (!key || seen.has(key)) continue;
+        curated.push(job);
+        seen.add(key);
+        if (limitTotal && curated.length >= limitTotal) break;
+        if (limitLinkedIn) {
+          const linkedInCount = curated.filter((entry) =>
+            (entry.source || "").toLowerCase().includes("linkedin")
+          ).length;
+          if (linkedInCount >= limitLinkedIn) break;
+        }
+      }
+    };
+
+    if (isLinkedInOnly) {
+      const thresholds = [70, 60, 50, 40, 0];
+      const targetCount = LINKEDIN_ONLY_TARGET;
+      for (const threshold of thresholds) {
+        const bucket = normalized.filter((job) => job.matchScore?.overall >= threshold);
+        addJobs(bucket, { limitTotal: targetCount });
+        if (curated.length >= targetCount) break;
+      }
+      normalized = curated;
+    } else {
+      const linkedInHighMatch = highMatchJobs.filter((job) =>
+        (job.source || "").toLowerCase().includes("linkedin")
+      );
+
+      const TARGET_HIGH_MATCH = 5;
+
+      // If we can satisfy "highly relevant only", return top 5 (LinkedIn first when possible).
+      if (highMatchJobs.length >= TARGET_HIGH_MATCH) {
+        if (linkedInHighMatch.length >= TARGET_HIGH_MATCH) {
+          addJobs(linkedInHighMatch, { limitTotal: TARGET_HIGH_MATCH });
+        } else {
+          addJobs(linkedInHighMatch);
+          addJobs(highMatchJobs, { limitTotal: TARGET_HIGH_MATCH });
+        }
+        normalized = curated;
+      } else {
+        // Not enough high-match jobs; include all high-match, then fill to 5 with best remaining.
+        addJobs(highMatchJobs);
+        addJobs(belowThreshold, { limitTotal: TARGET_HIGH_MATCH });
+        normalized = curated;
+      }
+    }
+  } else if (isLinkedInOnly && normalized.length > 0) {
+    normalized = normalized.slice(0, LINKEDIN_ONLY_TARGET);
   }
 
   const sourceOrder = { 
@@ -267,6 +362,43 @@ exports.scrapeJobsService = async ({
     
     return 0;
   });
+
+  if (!isLinkedInOnly && normalized.length > 0 && safeLimit >= 2) {
+    if (linkedInPoolSorted.length >= 2) {
+      const topLinkedIn = linkedInPoolSorted.slice(0, 2);
+      const linkedInKeys = new Set(topLinkedIn.map((job) => buildJobKey(job)));
+      normalized = [
+        ...topLinkedIn,
+        ...normalized.filter((job) => !linkedInKeys.has(buildJobKey(job))),
+      ];
+    } else if (linkedInPoolSorted.length > 0) {
+      console.warn(`[LinkedIn] Only ${linkedInPoolSorted.length} LinkedIn jobs available; cannot guarantee 2.`);
+    } else {
+      console.warn(`[LinkedIn] No LinkedIn jobs available to prioritize.`);
+    }
+  }
+
+  if (!isLinkedInOnly && normalized.length > 0) {
+    const avgMatchScore = normalized.reduce((sum, j) => sum + (j.matchScore?.overall || 0), 0) / normalized.length;
+    const lowRelevancy = avgMatchScore < 60;
+    if (lowRelevancy) {
+      const naukriPool = allNormalized.filter((job) =>
+        (job.source || "").toLowerCase().includes("naukri")
+      );
+      const currentNaukri = normalized.filter((job) =>
+        (job.source || "").toLowerCase().includes("naukri")
+      ).length;
+      if (naukriPool.length > 0 && currentNaukri < 2) {
+        const naukriToAdd = naukriPool.slice(0, 3);
+        const naukriKeys = new Set(naukriToAdd.map((job) => buildJobKey(job)));
+        normalized = [
+          ...naukriToAdd,
+          ...normalized.filter((job) => !naukriKeys.has(buildJobKey(job))),
+        ];
+        console.log(`[Naukri] Low relevance detected; injecting ${Math.min(3, naukriToAdd.length)} Naukri jobs.`);
+      }
+    }
+  }
 
   const finalJobs = normalized.slice(0, safeLimit);
   

@@ -25,7 +25,7 @@ const JOB_PORTALS = [
   },
   {
     name: "Indeed",
-    baseUrl: "https://www.indeed.com/jobs?q={}&l={}&sort=date",
+    baseUrl: "https://in.indeed.com/jobs?q={}&l={}&sort=date",
     scraper: "indeed",
     icon: "fas fa-search-dollar",
     color: "#003A9B",

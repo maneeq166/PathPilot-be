@@ -1,5 +1,7 @@
 const crypto = require("crypto");
-const { upsertJob, findJobs } = require("../../repositories/job");
+const { upsertJob, findJobs, findJobsByIds } = require("../../repositories/job");
+const { upsertJobMatch, findJobMatches, enforceJobMatchCap } = require("../../repositories/jobMatch");
+const { extractJobSkills } = require("./jobSkillExtractor");
 const { JOB_PORTALS } = require("../../config/jobPortals");
 const { runScraper, delay, runAllFallback } = require("./scrapers");
 const { getFallbackJobs } = require("./fallbackAPI");
@@ -52,6 +54,8 @@ const normalizeJob = (job, context = {}) => ({
   experience_level: normalizeText(job.experienceLevel || job.experience_level),
   salary_range: normalizeText(job.salaryRange || job.salary_range),
   job_type: normalizeText(job.employmentType || job.job_type),
+  cached: Boolean(job.cached),
+  cached_at: job.cachedAt || null,
 });
 
 const buildJobKey = (job) => [
@@ -64,6 +68,24 @@ const buildJobKey = (job) => [
   .filter(Boolean)
   .join("|")
   .toLowerCase();
+
+const runWithConcurrency = async (items, limit, handler) => {
+  if (!Array.isArray(items) || items.length === 0) return [];
+  const results = new Array(items.length);
+  let cursor = 0;
+
+  const worker = async () => {
+    while (cursor < items.length) {
+      const current = cursor;
+      cursor += 1;
+      results[current] = await handler(items[current], current);
+    }
+  };
+
+  const concurrency = Math.max(1, Math.min(limit || 1, items.length));
+  await Promise.all(new Array(concurrency).fill(0).map(worker));
+  return results;
+};
 
 const buildMockJobs = (query, location) => [
   {
@@ -106,17 +128,26 @@ exports.scrapeJobsService = async ({
   limit = 15,
   source = "all",
   userResume = null,
+  userId = null,
+  portalCookies = {},
   roleCatId,
   cityTypeGid,
   wfhType,
 }) => {
+  const normalizedQuery = (query || "").toString().trim();
+  let effectiveQuery = normalizedQuery;
+  if (!effectiveQuery && userResume?.inferredRole) {
+    effectiveQuery = userResume.inferredRole;
+    console.log(`[JobSearch] No query provided. Using inferred role: "${effectiveQuery}"`);
+  }
+
   console.log(`\n${'='.repeat(50)}`);
   console.log(`JOB SEARCH INITIATED`);
-  console.log(`Query: "${query}", Location: "${location}"`);
+  console.log(`Query: "${effectiveQuery || ""}", Location: "${location}"`);
   console.log(`='.repeat(50)}\n`);
 
-  if (!query) {
-    return { data: null, message: "query is required", statusCode: 400 };
+  if (!effectiveQuery) {
+    return { data: null, message: "query is required (or inferred role missing)", statusCode: 400 };
   }
 
   const safeLimit = Math.min(Math.max(Number(limit) || 15, 1), 15);
@@ -138,7 +169,7 @@ exports.scrapeJobsService = async ({
   }
 
   if (source === "mock") {
-    const mockJobs = buildMockJobs(query, location).slice(0, safeLimit);
+    const mockJobs = buildMockJobs(effectiveQuery, location).slice(0, safeLimit);
     const stored = await Promise.all(mockJobs.map((job) => upsertJob(job)));
     const normalized = stored.map((job) =>
       normalizeJob(job, { source: "mock", matched_query: query })
@@ -149,57 +180,70 @@ exports.scrapeJobsService = async ({
   const linkedInJobs = [];
   const otherPortalJobs = [];
   let totalScraped = 0;
+  const scrapeContext = { blockedPortals: [], cacheHits: [], portalAttempts: new Map() };
 
   const sortedPortals = [...JOB_PORTALS].sort((a, b) => (a.priority || 99) - (b.priority || 99));
 
   console.log(`\n--- PHASE 1: Portal Scraping (Priority Order) ---\n`);
-  for (const portal of sortedPortals) {
+  const portalsToRun = sortedPortals.filter((portal) => {
     if (source && source !== "all") {
       if (isLinkedInOnly) {
-        if (!portal.name.toLowerCase().includes("linkedin")) continue;
-      } else if (sourceLower !== portal.name.toLowerCase()) {
-        continue;
+        return portal.name.toLowerCase().includes("linkedin");
       }
+      return sourceLower === portal.name.toLowerCase();
     }
+    return true;
+  });
 
+  const portalResults = await runWithConcurrency(portalsToRun, portalsToRun.length, async (portal) => {
     try {
       const isLinkedIn = portal.name.toLowerCase().includes("linkedin");
-      const jobs = await runScraper(portal, query, location, {
+      const jobs = await runScraper(portal, effectiveQuery, location, {
         roleCatId,
         cityTypeGid,
         wfhType,
+        portalCookies,
         ...(isLinkedIn ? {
           maxPages: 5,
           targetHighMatch: isLinkedInOnly ? LINKEDIN_ONLY_TARGET : 5,
           minMatchScore: MIN_MATCH_SCORE,
           userProfile,
         } : {}),
-      });
-      totalScraped += jobs.length;
-      
-      if (jobs.length > 0) {
-        console.log(`[${portal.name}] Got ${jobs.length} jobs (Priority: ${portal.priority || 99})`);
-        
-        const jobsWithMeta = jobs.map((job) => ({
-          ...job,
-          portal_icon: portal.icon,
-          portal_color: portal.color,
-          portal_priority: portal.priority || 99,
-        }));
-
-        if (portal.name.toLowerCase().includes("linkedin")) {
-          linkedInJobs.push(...jobsWithMeta);
-        } else {
-          otherPortalJobs.push(...jobsWithMeta);
-        }
-      } else {
-        console.warn(`[${portal.name}] No jobs returned`);
-      }
+      }, scrapeContext);
+      return { portal, jobs };
     } catch (error) {
-      console.error(`[${portal.name}] CRASHED: ${error.message}`);
+      return { portal, error };
     }
-    await delay(1500);
-  }
+  });
+
+  portalResults.forEach((result) => {
+    if (!result) return;
+    const { portal, jobs, error } = result;
+    if (error) {
+      console.error(`[${portal.name}] CRASHED: ${error.message}`);
+      return;
+    }
+    totalScraped += jobs.length;
+
+    if (jobs.length > 0) {
+      console.log(`[${portal.name}] Got ${jobs.length} jobs (Priority: ${portal.priority || 99})`);
+
+      const jobsWithMeta = jobs.map((job) => ({
+        ...job,
+        portal_icon: portal.icon,
+        portal_color: portal.color,
+        portal_priority: portal.priority || 99,
+      }));
+
+      if (portal.name.toLowerCase().includes("linkedin")) {
+        linkedInJobs.push(...jobsWithMeta);
+      } else {
+        otherPortalJobs.push(...jobsWithMeta);
+      }
+    } else {
+      console.warn(`[${portal.name}] No jobs returned`);
+    }
+  });
 
   console.log(`\nLinkedIn jobs: ${linkedInJobs.length}`);
   console.log(`Other portal jobs: ${otherPortalJobs.length}`);
@@ -215,7 +259,7 @@ exports.scrapeJobsService = async ({
   if (!isLinkedInOnly && process.env.J_SEARCH_API_KEY && process.env.J_SEARCH_API_KEY !== "your_rapidapi_key_here") {
     console.log(`[Priority] Using JSearch API (aggregates LinkedIn jobs)`);
     const { fetchJSearch } = require("./fallbackAPI");
-    const jsearchJobs = await fetchJSearch(query, location, safeLimit * 2);
+    const jsearchJobs = await fetchJSearch(effectiveQuery, location, safeLimit * 2);
     if (jsearchJobs.length > 0) {
       jsearchJobs.forEach((job) => {
         apiJobs.push({
@@ -229,7 +273,7 @@ exports.scrapeJobsService = async ({
     console.log(`[JSearch] No API key configured`);
   }
   
-  const fallbackJobs = isLinkedInOnly ? [] : await getFallbackJobs(query, location, safeLimit * 2);
+  const fallbackJobs = isLinkedInOnly ? [] : await getFallbackJobs(effectiveQuery, location, safeLimit * 2);
   
   const fallbackWithMeta = fallbackJobs.map((job) => ({
     ...job,
@@ -255,7 +299,7 @@ exports.scrapeJobsService = async ({
         source: job.source,
         portal_icon: job.portal_icon,
         portal_color: job.portal_color,
-        matched_query: query,
+        matched_query: effectiveQuery,
         portal_priority: job.portal_priority,
       })
     )
@@ -401,6 +445,16 @@ exports.scrapeJobsService = async ({
   }
 
   const finalJobs = normalized.slice(0, safeLimit);
+
+  if (userProfile?.skills?.length) {
+    finalJobs.forEach((job) => {
+      const extracted = extractJobSkills(job.job_title, job.job_description);
+      const missing = extracted.filter((skill) =>
+        !userProfile.skills.includes(skill.toLowerCase())
+      );
+      job.missing_skills = missing;
+    });
+  }
   
   console.log(`\n--- FINAL RESULTS ---`);
   console.log(`Total: ${finalJobs.length} jobs`);
@@ -441,6 +495,7 @@ exports.scrapeJobsService = async ({
         scrapedAt: new Date(),
       })
     );
+    job._sourceId = sourceId;
   }
 
   console.log(`${'='.repeat(50)}`);
@@ -448,18 +503,115 @@ exports.scrapeJobsService = async ({
   console.log(`Final: ${finalJobs.length} jobs returned (max ${safeLimit})`);
   console.log(`=${'='.repeat(50)}\n`);
 
+  if (userId && userProfile?.skills?.length && finalJobs.length > 0) {
+    const topMatches = [...finalJobs]
+      .filter((job) => job.matchScore?.overall)
+      .sort((a, b) => b.matchScore.overall - a.matchScore.overall)
+      .slice(0, 10);
+
+    const storedBySourceId = new Map(stored.map((doc) => [doc.sourceId, doc]));
+
+    for (const job of topMatches) {
+      const storedJob = storedBySourceId.get(job._sourceId);
+      if (!storedJob) continue;
+      await upsertJobMatch({
+        userId,
+        jobId: storedJob._id,
+        query: effectiveQuery,
+        location: location || "",
+        source: job.source || "unknown",
+        matchScore: {
+          overall: job.matchScore?.overall || 0,
+          skillMatch: job.matchScore?.skillMatch || 0,
+          experienceMatch: job.matchScore?.experienceMatch || 0,
+        },
+        matchedSkills: job.matchScore?.matchedSkills || [],
+        missingSkills: job.missing_skills || [],
+        lastSeenAt: new Date(),
+      });
+    }
+    await enforceJobMatchCap({
+      userId,
+      query: effectiveQuery,
+      location: location || "",
+      cap: 10,
+    });
+  }
+
+  let mergedJobs = finalJobs;
+  if (userId) {
+    const savedMatches = await findJobMatches({
+      userId,
+      query: effectiveQuery,
+      location: location || "",
+      limit: 10,
+    });
+    if (savedMatches.length > 0) {
+      const jobDocs = await findJobsByIds(savedMatches.map((m) => m.jobId));
+      const jobDocById = new Map(jobDocs.map((doc) => [String(doc._id), doc]));
+      const savedJobs = savedMatches
+        .map((match) => {
+          const doc = jobDocById.get(String(match.jobId));
+          if (!doc) return null;
+          const normalizedJob = normalizeJob(doc, { source: doc.source });
+          normalizedJob.matchScore = {
+            overall: match.matchScore?.overall || 0,
+            skillMatch: match.matchScore?.skillMatch || 0,
+            experienceMatch: match.matchScore?.experienceMatch || 0,
+            matchedSkills: match.matchedSkills || [],
+          };
+          normalizedJob.missing_skills = match.missingSkills || [];
+          normalizedJob.saved_best_match = true;
+          return normalizedJob;
+        })
+        .filter(Boolean);
+
+      const seen = new Set();
+      const keyFor = (job) =>
+        [
+          job.source,
+          job.job_url,
+          job.company_name,
+          job.job_title,
+        ]
+          .filter(Boolean)
+          .join("|")
+          .toLowerCase();
+
+      mergedJobs = [];
+      savedJobs.forEach((job) => {
+        const key = keyFor(job);
+        if (!key || seen.has(key)) return;
+        seen.add(key);
+        mergedJobs.push(job);
+      });
+      finalJobs.forEach((job) => {
+        const key = keyFor(job);
+        if (!key || seen.has(key)) return;
+        seen.add(key);
+        mergedJobs.push(job);
+      });
+    }
+  }
+
+  const mergedAvgMatch = mergedJobs.length
+    ? mergedJobs.reduce((sum, j) => sum + (j.matchScore?.overall || 0), 0) / mergedJobs.length
+    : 0;
+
   return {
     data: { 
-      jobs: finalJobs,
+      jobs: mergedJobs,
       summary: {
-        total: finalJobs.length,
+        total: mergedJobs.length,
         bySource,
-        avgMatchScore: Math.round(avgMatch),
+        avgMatchScore: Math.round(mergedAvgMatch),
         hasResumeMatch: !!userProfile,
         userExperienceLevel: userProfile?.experienceLevel || null,
+        blockedPortals: scrapeContext.blockedPortals,
+        cacheHits: scrapeContext.cacheHits,
       }
     },
-    message: `Found ${finalJobs.length} matching jobs`,
+    message: `Found ${mergedJobs.length} matching jobs`,
     statusCode: 201,
   };
 };

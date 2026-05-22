@@ -62,3 +62,8 @@ exports.findJobs = async ({
   const total = await Job.countDocuments(filter);
   return { jobs, total };
 };
+
+exports.findJobsByIds = async (ids = []) => {
+  if (!ids || ids.length === 0) return [];
+  return Job.find({ _id: { $in: ids } });
+};

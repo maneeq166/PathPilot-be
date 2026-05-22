@@ -36,15 +36,21 @@ const toSlug = (value) =>
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/(^-|-$)/g, "");
 
-const autoScroll = async (page) => {
+const autoScroll = async (page, maxScrolls = 12) => {
   await page.evaluate(async () => {
     await new Promise((resolve) => {
       let totalHeight = 0;
       const distance = 400;
+      let scrolls = 0;
       const timer = setInterval(() => {
         window.scrollBy(0, distance);
         totalHeight += distance;
+        scrolls += 1;
         if (totalHeight >= document.body.scrollHeight) {
+          clearInterval(timer);
+          resolve();
+        }
+        if (scrolls >= maxScrolls) {
           clearInterval(timer);
           resolve();
         }
@@ -54,6 +60,32 @@ const autoScroll = async (page) => {
 };
 
 const safeText = (value) => (value || "").toString().replace(/\s+/g, " ").trim();
+
+const CACHE_TTL_MS = 15 * 60 * 1000;
+const JOB_CACHE = new Map();
+
+const buildCacheKey = (portalName, query, location) => {
+  const q = (query || "").toLowerCase().trim();
+  const loc = (location || "").toLowerCase().trim();
+  return `${portalName || "unknown"}|${q}|${loc}`;
+};
+
+const readCache = (portalName, query, location) => {
+  const key = buildCacheKey(portalName, query, location);
+  const entry = JOB_CACHE.get(key);
+  if (!entry) return null;
+  if (Date.now() - entry.ts > CACHE_TTL_MS) {
+    JOB_CACHE.delete(key);
+    return null;
+  }
+  return entry;
+};
+
+const writeCache = (portalName, query, location, jobs = []) => {
+  if (!Array.isArray(jobs) || jobs.length === 0) return;
+  const key = buildCacheKey(portalName, query, location);
+  JOB_CACHE.set(key, { ts: Date.now(), jobs });
+};
 
 const BLOCK_PAGE_PATTERNS = [
   "captcha",
@@ -66,25 +98,128 @@ const BLOCK_PAGE_PATTERNS = [
   "enable javascript",
 ];
 
-const isBlockedPageContent = (content = "") => {
-  const lower = content.toLowerCase();
-  return BLOCK_PAGE_PATTERNS.some((pattern) => lower.includes(pattern));
+const PORTAL_BLOCK_PATTERNS = {
+  LinkedIn: [
+    "captcha",
+    "verify you are human",
+    "unusual traffic",
+    "security check",
+    "access denied",
+    "sign in to view more",
+  ],
+  Naukri: [
+    "access denied",
+    "robot check",
+    "verify you are human",
+    "unusual traffic",
+    "captcha",
+  ],
+  Indeed: [
+    "captcha",
+    "verify you are human",
+    "unusual traffic",
+    "access denied",
+  ],
+};
+
+const detectBlock = (content = "", portalName = "") => {
+  const lower = (content || "").toLowerCase();
+  const portalPatterns = PORTAL_BLOCK_PATTERNS[portalName] || [];
+  const allPatterns = [...portalPatterns, ...BLOCK_PAGE_PATTERNS];
+  const match = allPatterns.find((pattern) => lower.includes(pattern));
+  if (match) {
+    return { blocked: true, reason: match };
+  }
+  return { blocked: false, reason: null };
 };
 
 const logPortalBlocked = (portalName, reason) => {
   console.warn(`[${portalName}] Blocked page detected${reason ? `: ${reason}` : ""}. Skipping portal.`);
 };
 
-const isNaukriBlocked = (html = "") => {
-  const lower = html.toLowerCase();
-  return (
-    lower.includes("access denied") ||
-    lower.includes("robot check") ||
-    lower.includes("verify you are human") ||
-    lower.includes("unusual traffic") ||
-    lower.includes("captcha")
-  );
+const isNaukriBlocked = (html = "") => detectBlock(html, "Naukri").blocked;
+
+const COOKIE_ENV_MAP = {
+  linkedin: "LINKEDIN_COOKIES_JSON",
+  naukri: "NAUKRI_COOKIES_JSON",
+  indeed: "INDEED_COOKIES_JSON",
 };
+
+const getCookieEnvName = (portalName = "") => {
+  const key = (portalName || "").toLowerCase();
+  if (key.includes("linkedin")) return COOKIE_ENV_MAP.linkedin;
+  if (key.includes("naukri")) return COOKIE_ENV_MAP.naukri;
+  if (key.includes("indeed")) return COOKIE_ENV_MAP.indeed;
+  return COOKIE_ENV_MAP[key] || null;
+};
+
+const getCookiesFromEnv = (portalName = "") => {
+  const envName = getCookieEnvName(portalName);
+  if (!envName) return null;
+  const raw = process.env[envName];
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) {
+      console.warn(`[${portalName}] Cookie JSON is not an array.`);
+      return null;
+    }
+    return parsed;
+  } catch (err) {
+    console.warn(`[${portalName}] Invalid cookie JSON: ${err.message}`);
+    return null;
+  }
+};
+
+const buildCookieHeader = (cookies = []) =>
+  cookies
+    .filter((c) => c && c.name && typeof c.value !== "undefined")
+    .map((c) => `${c.name}=${c.value}`)
+    .join("; ");
+
+const getPortalCookies = (portalName, options = {}) => {
+  const key = (portalName || "").toLowerCase();
+  const map = options.portalCookies || options.portalCookieMap || {};
+  const mapped =
+    map[key] ||
+    (key.includes("linkedin") ? map.linkedin : null) ||
+    (key.includes("naukri") ? map.naukri : null) ||
+    (key.includes("indeed") ? map.indeed : null);
+  return mapped || getCookiesFromEnv(portalName);
+};
+
+const applyPuppeteerCookies = async (page, portalName, url, options = {}) => {
+  const cookies = getPortalCookies(portalName, options);
+  if (!cookies || cookies.length === 0) return;
+  const withUrl = cookies.map((cookie) => {
+    if (cookie.url || cookie.domain) return cookie;
+    if (url) return { ...cookie, url };
+    return cookie;
+  });
+  try {
+    await page.setCookie(...withUrl);
+    console.log(`[${portalName}] Applied ${withUrl.length} cookies`);
+  } catch (err) {
+    console.warn(`[${portalName}] Failed to apply cookies: ${err.message}`);
+  }
+};
+
+const buildPortalCookieHeader = (portalName, options = {}) => {
+  const cookies = getPortalCookies(portalName, options);
+  if (!cookies || cookies.length === 0) return null;
+  const header = buildCookieHeader(cookies);
+  return header || null;
+};
+
+const createBlockedError = (portalName, reason) => {
+  const err = new Error(`[${portalName}] Blocked: ${reason || "unknown"}`);
+  err.isBlocked = true;
+  err.portalName = portalName;
+  err.reason = reason || "blocked";
+  return err;
+};
+
+const isBlockedError = (err) => Boolean(err && err.isBlocked);
 
 const buildNaukriHeaders = () => ({
   ...buildHeaders(),
@@ -95,42 +230,59 @@ const buildNaukriHeaders = () => ({
   "referer": "https://www.naukri.com/",
 });
 
-const fetchNaukriHtml = async (url) => {
+const fetchNaukriHtml = async (url, options = {}) => {
   // Strategy 1: proxy + standard headers
   try {
     const { response, success } = await fetchWithProxy(url, {
       headers: buildNaukriHeaders(),
+      portalName: "Naukri",
+      ...options,
     });
     if (success && response) {
       const html = await response.text();
-      if (html && !isNaukriBlocked(html)) return html;
+      const blockCheck = detectBlock(html, "Naukri");
+      if (html && !blockCheck.blocked) return html;
+      if (html && blockCheck.blocked) {
+        logPortalBlocked("Naukri", blockCheck.reason || "proxy response");
+        throw createBlockedError("Naukri", blockCheck.reason);
+      }
       if (html) logPortalBlocked("Naukri", "proxy response");
       else console.warn("[Naukri] Proxy fetch returned empty HTML.");
     }
   } catch (err) {
+    if (isBlockedError(err)) throw err;
     console.warn(`[Naukri] Proxy fetch failed: ${err.message}`);
   }
 
   // Strategy 2: direct fetch with alternate UA
   try {
+    const cookieHeader = buildPortalCookieHeader("Naukri", options);
     const res = await fetch(url, {
       headers: {
         ...buildNaukriHeaders(),
         "user-agent": getRandomUA(),
+        ...(cookieHeader ? { cookie: cookieHeader } : {}),
       },
     });
     const html = await res.text();
-    if (html && !isNaukriBlocked(html)) return html;
+    const blockCheck = detectBlock(html, "Naukri");
+    if (html && !blockCheck.blocked) return html;
+    if (html && blockCheck.blocked) {
+      logPortalBlocked("Naukri", blockCheck.reason || "direct response");
+      throw createBlockedError("Naukri", blockCheck.reason);
+    }
     if (html) logPortalBlocked("Naukri", "direct response");
     else console.warn("[Naukri] Direct fetch returned empty HTML.");
   } catch (err) {
+    if (isBlockedError(err)) throw err;
     console.warn(`[Naukri] Direct fetch failed: ${err.message}`);
   }
 
   // Strategy 3: puppeteer render fallback
+  let browser;
   try {
     const puppeteer = require("puppeteer");
-    const browser = await puppeteer.launch({
+    browser = await puppeteer.launch({
       headless: "new",
       args: [
         "--no-sandbox",
@@ -143,14 +295,26 @@ const fetchNaukriHtml = async (url) => {
     const page = await browser.newPage();
     await page.setViewport({ width: 1920, height: 1080 });
     await page.setUserAgent(getRandomUA());
+    await applyPuppeteerCookies(page, "Naukri", url, options);
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
     await randomDelay();
     const html = await page.content();
-    await browser.close();
-    if (html && !isNaukriBlocked(html)) return html;
+    const blockCheck = detectBlock(html, "Naukri");
+    if (html && !blockCheck.blocked) return html;
+    if (html && blockCheck.blocked) {
+      logPortalBlocked("Naukri", blockCheck.reason || "browser render");
+      throw createBlockedError("Naukri", blockCheck.reason);
+    }
     if (html) logPortalBlocked("Naukri", "browser render");
   } catch (err) {
+    if (isBlockedError(err)) throw err;
     console.warn(`[Naukri] Puppeteer fallback failed: ${err.message}`);
+  } finally {
+    if (browser) {
+      try {
+        await browser.close();
+      } catch (_) {}
+    }
   }
 
   return "";
@@ -204,13 +368,14 @@ const extractJobsFromJson = (data, limit = 200) => {
   return results;
 };
 
-const fetchNaukriJobsViaBrowser = async (url) => {
+const fetchNaukriJobsViaBrowser = async (url, options = {}) => {
   const jobs = [];
   let jsonResponses = 0;
   let jobHits = 0;
 
+  let browser;
   try {
-    const browser = await puppeteer.launch({
+    browser = await puppeteer.launch({
       headless: "new",
       args: [
         "--no-sandbox",
@@ -223,6 +388,7 @@ const fetchNaukriJobsViaBrowser = async (url) => {
     const page = await browser.newPage();
     await page.setViewport({ width: 1920, height: 1080 });
     await page.setUserAgent(getRandomUA());
+    await applyPuppeteerCookies(page, "Naukri", url, options);
 
     page.on("response", async (response) => {
       try {
@@ -246,9 +412,24 @@ const fetchNaukriJobsViaBrowser = async (url) => {
     await autoScroll(page);
     await delay(3000);
 
-    await browser.close();
+    const html = await page.content();
+    const blockCheck = detectBlock(html, "Naukri");
+    if (blockCheck.blocked) {
+      await browser.close();
+      throw createBlockedError("Naukri", blockCheck.reason);
+    }
+
   } catch (err) {
+    if (isBlockedError(err)) {
+      throw err;
+    }
     console.warn(`[Naukri] Puppeteer JSON capture failed: ${err.message}`);
+  } finally {
+    if (browser) {
+      try {
+        await browser.close();
+      } catch (_) {}
+    }
   }
 
   const deduped = [];
@@ -278,6 +459,10 @@ async function fetchWithProxy(url, options = {}) {
     ...buildHeaders(),
     ...options.headers,
   };
+  const portalCookieHeader = buildPortalCookieHeader(options.portalName, options);
+  if (portalCookieHeader) {
+    headers["cookie"] = portalCookieHeader;
+  }
 
   try {
     const response = await retryWithBackoff(async () => {
@@ -384,6 +569,7 @@ const scrapeLinkedIn = async (query, location, portal, options = {}) => {
 
     const ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36";
     await page.setUserAgent(ua);
+    await applyPuppeteerCookies(page, "LinkedIn", "https://www.linkedin.com", options);
 
     const collected = [];
     const seen = new Set();
@@ -428,15 +614,16 @@ const scrapeLinkedIn = async (query, location, portal, options = {}) => {
             ".jobs-search-results__list-item, .job-card-container, [data-job-id], .base-card, .jobs-search__results-list li"
           ).length,
           title: document.title,
+          bodyText,
         };
       });
 
       console.log(`[LinkedIn] Check: captcha=${pageCheck.hasCaptcha}, jobs=${pageCheck.hasJobs}`);
 
-      if (pageCheck.hasCaptcha) {
-        console.log(`[LinkedIn] Blocked by captcha, trying scroll...`);
-        await page.evaluate(() => window.scrollTo(0, 500));
-        await delay(2000);
+      const blockCheck = detectBlock(pageCheck.bodyText || "", "LinkedIn");
+      if (pageCheck.hasCaptcha || blockCheck.blocked) {
+        console.log(`[LinkedIn] Blocked by captcha/verification`);
+        throw createBlockedError("LinkedIn", blockCheck.reason || "captcha");
       }
 
       if (pageCheck.hasJobs > 0) {
@@ -560,6 +747,9 @@ const scrapeLinkedIn = async (query, location, portal, options = {}) => {
     }));
 
   } catch (error) {
+    if (isBlockedError(error)) {
+      throw error;
+    }
     console.error(`[LinkedIn] Error: ${error.message}`);
     return [];
   } finally {
@@ -598,7 +788,7 @@ const scrapeNaukri = async (query, location, portal, options = {}) => {
   console.log(`[Naukri] URL: ${url}`);
 
   try {
-    const html = await fetchNaukriHtml(url);
+    const html = await fetchNaukriHtml(url, options);
     if (!html) {
       console.warn(`[Naukri] Fetch failed`);
       return [];
@@ -788,7 +978,7 @@ const scrapeNaukri = async (query, location, portal, options = {}) => {
 
     if (results.length === 0) {
       console.log(`[Naukri] Trying browser JSON capture fallback...`);
-      const browserJobs = await fetchNaukriJobsViaBrowser(url);
+      const browserJobs = await fetchNaukriJobsViaBrowser(url, options);
       if (browserJobs.length > 0) {
         results = browserJobs;
       }
@@ -799,23 +989,27 @@ const scrapeNaukri = async (query, location, portal, options = {}) => {
 
     return results;
   } catch (error) {
+    if (isBlockedError(error)) {
+      throw error;
+    }
     console.error(`[Naukri] Error: ${error.message}`);
     return [];
   }
 };
 
-const scrapeIndeedViaBrowser = async (query, location, portal) => {
+const scrapeIndeedViaBrowser = async (query, location, portal, options = {}) => {
   console.log(`\n========== Indeed Browser Scraper ==========`);
   const url = fillUrl(portal.baseUrl, query, location);
   console.log(`[IndeedBrowser] URL: ${url}`);
 
+  let browser;
   try {
     if (!puppeteer) {
       console.warn(`[IndeedBrowser] Puppeteer not available`);
       return [];
     }
 
-    const browser = await puppeteer.launch({
+    browser = await puppeteer.launch({
       headless: "new",
       args: [
         "--no-sandbox",
@@ -829,17 +1023,18 @@ const scrapeIndeedViaBrowser = async (query, location, portal) => {
     const page = await browser.newPage();
     await page.setViewport({ width: 1920, height: 1080 });
     await page.setUserAgent(getRandomUA());
+    await applyPuppeteerCookies(page, "Indeed", url, options);
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
     await delay(3000);
     await autoScroll(page);
     await delay(2000);
 
     const html = await page.content();
-    await browser.close();
 
-    if (isBlockedPageContent(html)) {
-      logPortalBlocked("Indeed", "browser render verification page");
-      return [];
+    const blockCheck = detectBlock(html, "Indeed");
+    if (blockCheck.blocked) {
+      logPortalBlocked("Indeed", blockCheck.reason);
+      throw createBlockedError("Indeed", blockCheck.reason);
     }
 
     const $ = cheerio.load(html);
@@ -890,12 +1085,21 @@ const scrapeIndeedViaBrowser = async (query, location, portal) => {
     console.log(`========================================\n`);
     return unique;
   } catch (error) {
+    if (isBlockedError(error)) {
+      throw error;
+    }
     console.error(`[IndeedBrowser] Error: ${error.message}`);
     return [];
+  } finally {
+    if (browser) {
+      try {
+        await browser.close();
+      } catch (_) {}
+    }
   }
 };
 
-const scrapeIndeed = async (query, location, portal) => {
+const scrapeIndeed = async (query, location, portal, options = {}) => {
   console.log(`\n========== Indeed Scraper ==========`);
   console.log(`Query: "${query}", Location: "${location}"`);
 
@@ -903,20 +1107,25 @@ const scrapeIndeed = async (query, location, portal) => {
   console.log(`[Indeed] URL: ${url}`);
 
   try {
-    const { response, success } = await fetchWithProxy(url);
+    const { response, success } = await fetchWithProxy(url, { portalName: "Indeed", ...options });
     
     if (!success || !response) {
       console.warn(`[Indeed] Fetch failed, trying browser fallback`);
-      return await scrapeIndeedViaBrowser(query, location, portal);
+      return await scrapeIndeedViaBrowser(query, location, portal, options);
     }
 
     console.log(`[Indeed] Response status: ${response.status}`);
     const html = await response.text();
     console.log(`[Indeed] HTML length: ${html.length} chars`);
 
-    if (isBlockedPageContent(html)) {
-      logPortalBlocked("Indeed", "captcha or verification page");
-      return await scrapeIndeedViaBrowser(query, location, portal);
+    const blockCheck = detectBlock(html, "Indeed");
+    if (blockCheck.blocked) {
+      logPortalBlocked("Indeed", blockCheck.reason);
+      const fallback = await scrapeIndeedViaBrowser(query, location, portal, options);
+      if (fallback.length === 0) {
+        throw createBlockedError("Indeed", blockCheck.reason);
+      }
+      return fallback;
     }
 
     const $ = cheerio.load(html);
@@ -990,6 +1199,9 @@ const scrapeIndeed = async (query, location, portal) => {
 
     return unique;
   } catch (error) {
+    if (isBlockedError(error)) {
+      throw error;
+    }
     console.error(`[Indeed] Error: ${error.message}`);
     return [];
   }
@@ -1047,21 +1259,22 @@ const scrapeJobs2Careers = async (query, location) => {
   }
 };
 
-const scrapeIndeedAlternative = async (query, location) => {
+const scrapeIndeedAlternative = async (query, location, options = {}) => {
   console.log(`\n========== Indeed Alternative Scraper ==========`);
 
   try {
     const url = `https://www.indeed.com/jobs?q=${encodeURIComponent(query)}&l=${encodeURIComponent(location || "USA")}`;
     console.log(`[IndeedAlt] URL: ${url}`);
 
-    const { response } = await fetchWithProxy(url);
+    const { response } = await fetchWithProxy(url, { portalName: "Indeed", ...options });
     
     if (!response) return [];
 
     const html = await response.text();
-    if (isBlockedPageContent(html)) {
-      logPortalBlocked("Indeed", "alternate route captcha or verification page");
-      return [];
+    const blockCheck = detectBlock(html, "Indeed");
+    if (blockCheck.blocked) {
+      logPortalBlocked("Indeed", blockCheck.reason);
+      throw createBlockedError("Indeed", blockCheck.reason);
     }
     const $ = cheerio.load(html);
 
@@ -1088,32 +1301,109 @@ const scrapeIndeedAlternative = async (query, location) => {
 
     return results;
   } catch (error) {
+    if (isBlockedError(error)) {
+      throw error;
+    }
     console.error(`[IndeedAlt] Error: ${error.message}`);
     return [];
   }
 };
 
-const runScraper = async (portal, query, location, options = {}) => {
+const withTimeout = (promise, ms, label) => {
+  if (!ms) return promise;
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      const err = new Error(`${label || "Scraper"} timed out after ${ms}ms`);
+      err.isTimeout = true;
+      reject(err);
+    }, ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+};
+
+const runScraper = async (portal, query, location, options = {}, context = {}) => {
   try {
     console.log(`\n>>>>>> Running scraper: ${portal.name} <<<<<<`);
     
-    let jobs = [];
-    switch (portal.scraper) {
-      case "linkedin":
-        jobs = await scrapeLinkedIn(query, location, portal, options);
-        break;
-      case "naukri":
-        jobs = await scrapeNaukri(query, location, portal, options);
-        break;
-      case "indeed":
-        jobs = await scrapeIndeed(query, location, portal);
-        break;
-      default:
-        console.warn(`[Scraper] Unknown scraper type: ${portal.scraper}`);
+    const portalName = portal.name;
+    const attemptBudget = Math.max(1, Math.min(options.attemptBudget || 2, 3));
+    const timeoutMs = options.timeoutMs || 90000;
+
+    context.blockedPortals = context.blockedPortals || [];
+    context.cacheHits = context.cacheHits || [];
+    context.portalAttempts = context.portalAttempts || new Map();
+
+    if (context.blockedPortals.find((entry) => entry.name === portalName)) {
+      console.warn(`[Scraper] ${portalName} previously blocked; skipping.`);
+      const cached = readCache(portalName, query, location);
+      if (cached?.jobs?.length) {
+        context.cacheHits.push({ name: portalName, timestamp: Date.now(), reason: "prior_block" });
+        return cached.jobs.map((job) => ({ ...job, cached: true, cachedAt: cached.ts }));
+      }
+      return [];
     }
 
-    console.log(`[Scraper] ${portal.name} returned ${jobs.length} jobs`);
-    return jobs;
+    let attempts = context.portalAttempts.get(portalName) || 0;
+    let lastError = null;
+    let jobs = [];
+    while (attempts < attemptBudget) {
+      attempts += 1;
+      context.portalAttempts.set(portalName, attempts);
+
+      try {
+        switch (portal.scraper) {
+          case "linkedin":
+            jobs = await withTimeout(scrapeLinkedIn(query, location, portal, options), timeoutMs, portalName);
+            break;
+          case "naukri":
+            jobs = await withTimeout(scrapeNaukri(query, location, portal, options), timeoutMs, portalName);
+            break;
+          case "indeed":
+            jobs = await withTimeout(scrapeIndeed(query, location, portal, options), timeoutMs, portalName);
+            break;
+          default:
+            console.warn(`[Scraper] Unknown scraper type: ${portal.scraper}`);
+        }
+
+        if (jobs && jobs.length > 0) {
+          writeCache(portalName, query, location, jobs);
+          console.log(`[Scraper] ${portalName} returned ${jobs.length} jobs`);
+          return jobs;
+        }
+
+        lastError = new Error(`[Scraper] ${portalName} returned no jobs`);
+      } catch (error) {
+        lastError = error;
+        if (isBlockedError(error)) {
+          context.blockedPortals.push({
+            name: portalName,
+            reason: error.reason || "blocked",
+            timestamp: Date.now(),
+          });
+          console.warn(`[Scraper] ${portalName} blocked: ${error.reason || "unknown"}`);
+          break;
+        }
+        console.warn(`[Scraper] ${portalName} attempt ${attempts} failed: ${error.message}`);
+      }
+
+      const backoff = Math.min(1500 * attempts + Math.random() * 500, 4000);
+      await delay(backoff);
+    }
+
+    if (lastError?.isTimeout) {
+      console.warn(`[Scraper] ${portalName} timed out; checking cache`);
+    }
+
+    const cached = readCache(portalName, query, location);
+    if (cached?.jobs?.length) {
+      context.cacheHits.push({ name: portalName, timestamp: Date.now(), reason: "cache_fallback" });
+      console.log(`[Scraper] ${portalName} cache fallback used (${cached.jobs.length} jobs)`);
+      return cached.jobs.map((job) => ({ ...job, cached: true, cachedAt: cached.ts }));
+    }
+
+    console.log(`[Scraper] ${portalName} returned 0 jobs`);
+    return [];
   } catch (error) {
     console.error(`[Scraper] ${portal.name} crashed: ${error.message}`);
     return [];

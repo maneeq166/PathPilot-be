@@ -1,4 +1,10 @@
 const { scrapeJobsService, getJobsService } = require("../../services/job");
+const {
+  setPortalCookies,
+  clearPortalCookies,
+  getAllPortalStatus,
+  getUserPortalCookiesMap,
+} = require("../../services/job/portalAuth");
 const { fetchFreeProxies, testProxy, BACKUP_PROXIES } = require("../../services/job/proxyService");
 const { PUBLIC_APIS, fetchJSearch, fetchJooble } = require("../../services/job/fallbackAPI");
 const { testPublicAPI, scrapeLinkedIn, scrapeNaukri, scrapeIndeed } = require("../../services/job/scrapers");
@@ -12,15 +18,20 @@ exports.handleScrapeJobs = asyncHandler(async (req, res) => {
   if (req.id) {
     try {
       const Resume = require("../../models/resumeModel");
-      const resume = await Resume.findOne({ userId: req.id }).select("parsedData");
+      const resume = await Resume.findOne({ userId: req.id }).select("parsedData inferredRole");
       if (resume?.parsedData) {
-        userResume = resume.parsedData;
+        userResume = {
+          ...resume.parsedData,
+          inferredRole: resume.inferredRole || null,
+        };
         console.log("[JobController] Loaded user resume for matching");
       }
     } catch (err) {
       console.warn("[JobController] Could not fetch user resume:", err.message);
     }
   }
+
+  const portalCookies = req.id ? getUserPortalCookiesMap(req.id) : {};
 
   const result = await scrapeJobsService({
     query: req.body?.query,
@@ -31,6 +42,8 @@ exports.handleScrapeJobs = asyncHandler(async (req, res) => {
     cityTypeGid: req.body?.cityTypeGid,
     wfhType: req.body?.wfhType,
     userResume,
+    userId: req.id || null,
+    portalCookies,
   });
 
   return res
@@ -172,4 +185,32 @@ exports.handleTestSources = asyncHandler(async (req, res) => {
   return res
     .status(200)
     .json(new ApiResponse(200, results, "Test complete"));
+});
+
+exports.handleSetPortalCookies = asyncHandler(async (req, res) => {
+  const userId = req.id;
+  const { portal, cookies } = req.body || {};
+  const result = setPortalCookies(userId, portal, cookies);
+  const statusCode = result.ok ? 200 : 400;
+  return res
+    .status(statusCode)
+    .json(new ApiResponse(statusCode, null, result.message));
+});
+
+exports.handleGetPortalStatus = asyncHandler(async (req, res) => {
+  const userId = req.id;
+  const data = getAllPortalStatus(userId);
+  return res
+    .status(200)
+    .json(new ApiResponse(200, data, "Portal status retrieved"));
+});
+
+exports.handleClearPortalCookies = asyncHandler(async (req, res) => {
+  const userId = req.id;
+  const portal = req.params?.portal;
+  const result = clearPortalCookies(userId, portal);
+  const statusCode = result.ok ? 200 : 400;
+  return res
+    .status(statusCode)
+    .json(new ApiResponse(statusCode, null, result.message));
 });
